@@ -179,6 +179,12 @@ pub enum CommandSource<'a> {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct EventNormalizer;
 
+impl Default for EventNormalizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventNormalizer {
     pub fn new() -> Self {
         Self

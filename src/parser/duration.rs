@@ -6,6 +6,12 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DurationParser;
 
+impl Default for DurationParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DurationParser {
     pub fn new() -> Self {
         Self
@@ -38,6 +44,16 @@ pub enum DurationUnit {
 }
 
 impl DurationUnit {
+    pub fn variants() -> Vec<Self> {
+        vec![
+            Self::Seconds,
+            Self::Minutes,
+            Self::Hours,
+            Self::Days,
+            Self::Weeks,
+        ]
+    }
+
     fn from_suffix(suffix: char) -> Result<Self, DurationParseError> {
         match suffix {
             's' => Ok(Self::Seconds),
@@ -101,7 +117,35 @@ fn parse_duration(input: &str) -> Result<ParsedDuration, DurationParseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DurationParseError, DurationParser, DurationUnit};
+    use super::{DurationParseError, DurationParser, DurationUnit, ParsedDuration};
+
+    #[test]
+    fn duration_seconds_multiplier_always_positive() {
+        for unit in DurationUnit::variants() {
+            assert!(unit.seconds_multiplier() > 0);
+        }
+    }
+
+    #[test]
+    fn duration_into_std_never_zero() {
+        let values: Vec<u64> = vec![1, 10, 100, 500, 999];
+        for value in values {
+            for unit in DurationUnit::variants() {
+                let parsed = ParsedDuration { value, unit };
+                let duration = parsed.into_std();
+                assert!(duration.as_secs() > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn duration_roundtrips_valid_input() {
+        let inputs = vec!["1s", "5m", "2h", "7d", "3w", "100s", "99m"];
+        for input in inputs {
+            let parsed = DurationParser::new().parse(input);
+            assert!(parsed.is_ok(), "input {} should parse", input);
+        }
+    }
 
     #[test]
     fn parses_supported_duration_units() {

@@ -6,6 +6,12 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct TargetSelectorParser;
 
+impl Default for TargetSelectorParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TargetSelectorParser {
     pub fn new() -> Self {
         Self
@@ -141,6 +147,53 @@ mod tests {
     };
     use chrono::Utc;
     use serde_json::json;
+
+    #[test]
+    fn valid_username_roundtrips() {
+        let usernames = vec!["user", "User123", "user_123", "a", "test_user_123"];
+        for username in usernames {
+            let input = format!("@{}", username);
+            let parsed = TargetSelectorParser::new()
+                .parse(&input)
+                .unwrap_or_else(|_| panic!("{} should parse", input));
+            match parsed {
+                ParsedTargetSelector::Username { username: u } => {
+                    assert_eq!(u, username);
+                }
+                other => panic!("expected Username, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn valid_user_id_roundtrips() {
+        let ids = vec![1, 42, 1000, 999999, -100, -42];
+        for id in ids {
+            let input = id.to_string();
+            let parsed = TargetSelectorParser::new()
+                .parse(&input)
+                .unwrap_or_else(|_| panic!("{} should parse", input));
+            match parsed {
+                ParsedTargetSelector::UserId { user_id } => {
+                    assert_eq!(user_id, id);
+                }
+                other => panic!("expected UserId, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn user_id_parses_negative() {
+        let ids = vec![-100, -42, -1];
+        for id in ids {
+            let input = id.to_string();
+            let parsed = TargetSelectorParser::new()
+                .parse(&input)
+                .unwrap_or_else(|_| panic!("{} should parse", input));
+            let is_user_id = matches!(parsed, ParsedTargetSelector::UserId { .. });
+            assert!(is_user_id);
+        }
+    }
 
     fn event_with_reply() -> EventContext {
         let mut event = EventContext::new(

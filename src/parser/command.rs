@@ -10,6 +10,12 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct CommandParser;
 
+impl Default for CommandParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandParser {
     pub fn new() -> Self {
         Self
