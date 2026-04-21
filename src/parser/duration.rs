@@ -1,4 +1,5 @@
 use std::time::Duration;
+
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -76,12 +77,20 @@ fn parse_duration(input: &str) -> Result<ParsedDuration, DurationParseError> {
         return Err(DurationParseError::EmptyInput);
     }
 
-    let (number, suffix) = input.split_at(input.len().saturating_sub(1));
-    let suffix = suffix
-        .chars()
-        .next()
-        .ok_or(DurationParseError::MissingUnit)?;
+    if input.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(DurationParseError::MissingUnit);
+    }
+
+    let mut chars = input.chars();
+    let suffix = chars.next_back().ok_or(DurationParseError::MissingUnit)?;
+    let number = chars.as_str();
     let unit = DurationUnit::from_suffix(suffix)?;
+
+    if number.is_empty() || !number.chars().all(|ch| ch.is_ascii_digit()) || number.starts_with('0')
+    {
+        return Err(DurationParseError::InvalidValue(number.to_owned()));
+    }
+
     let value = number
         .parse::<u64>()
         .map_err(|_| DurationParseError::InvalidValue(number.to_owned()))?;
@@ -104,10 +113,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duration_without_valid_suffix() {
+    fn rejects_duration_without_unit() {
         let parser = DurationParser::new();
 
         let err = parser.parse("30").expect_err("suffix required");
-        assert_eq!(err, DurationParseError::InvalidUnit('0'));
+        assert_eq!(err, DurationParseError::MissingUnit);
+    }
+
+    #[test]
+    fn rejects_invalid_duration_value() {
+        let parser = DurationParser::new();
+
+        let err = parser.parse("xh").expect_err("numeric value required");
+        assert_eq!(err, DurationParseError::InvalidValue("x".to_owned()));
+    }
+
+    #[test]
+    fn rejects_invalid_duration_unit() {
+        let parser = DurationParser::new();
+
+        let err = parser.parse("7y").expect_err("unsupported unit must fail");
+        assert_eq!(err, DurationParseError::InvalidUnit('y'));
     }
 }
