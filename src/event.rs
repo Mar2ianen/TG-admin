@@ -80,6 +80,14 @@ impl EventContext {
     }
 
     pub fn command_source(&self) -> Option<CommandSource<'_>> {
+        if matches!(self.update_type, UpdateType::CallbackQuery) {
+            return self
+                .callback
+                .as_ref()
+                .and_then(|callback| callback.data.as_deref())
+                .map(CommandSource::CallbackData);
+        }
+
         if let Some(text) = self
             .message
             .as_ref()
@@ -674,9 +682,9 @@ fn validate_telegram_shape(input: &TelegramUpdateInput) -> Result<(), EventNorma
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatContext, CommandSource, EventContext, EventNormalizationError, EventNormalizer,
-        ExecutionMode, ManualInvocationInput, MessageContext, ScheduledJobInput, SenderContext,
-        SystemContext, SystemOrigin, TelegramUpdateInput, UnitContext, UpdateType,
+        CallbackContext, ChatContext, CommandSource, EventContext, EventNormalizationError,
+        EventNormalizer, ExecutionMode, ManualInvocationInput, MessageContext, ScheduledJobInput,
+        SenderContext, SystemContext, SystemOrigin, TelegramUpdateInput, UnitContext, UpdateType,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
@@ -813,6 +821,79 @@ mod tests {
     }
 
     #[test]
+    fn manual_normalization_snapshot_shape_stays_stable() {
+        let normalizer = EventNormalizer::new();
+        let mut input = ManualInvocationInput::new(
+            UnitContext::new("moderation.warn").with_trigger("manual"),
+            "/warn @spam spam",
+        );
+        input.event_id = Some("evt_manual_snapshot".to_owned());
+        input.received_at = ts();
+        input.chat = Some(chat());
+        input.sender = Some(sender());
+        input.locale = Some("ru".to_owned());
+        input.trace_id = Some("trace-manual".to_owned());
+        input.build = Some("dev".to_owned());
+
+        let event = normalizer
+            .normalize_manual(input)
+            .expect("manual normalization must succeed");
+
+        let snapshot = serde_json::to_string_pretty(&event).expect("event serializes");
+        assert_eq!(
+            snapshot,
+            r#"{
+  "event_id": "evt_manual_snapshot",
+  "update_id": null,
+  "update_type": "system",
+  "received_at": "2026-04-21T09:30:00Z",
+  "execution_mode": "manual",
+  "recovery": false,
+  "chat": {
+    "id": -100123,
+    "type": "supergroup",
+    "title": "Moderation HQ",
+    "username": "mod_hq",
+    "thread_id": 11
+  },
+  "sender": {
+    "id": 42,
+    "username": "admin",
+    "display_name": "Admin",
+    "is_bot": false,
+    "is_admin": true,
+    "role": "owner"
+  },
+  "message": {
+    "id": 0,
+    "date": "2026-04-21T09:30:00Z",
+    "text": "/warn @spam spam",
+    "entities": [],
+    "has_media": false,
+    "file_ids": [],
+    "reply_to_message_id": null,
+    "media_group_id": null
+  },
+  "reply": null,
+  "callback": null,
+  "job": null,
+  "system": {
+    "locale": "ru",
+    "unit": {
+      "id": "moderation.warn",
+      "version": null,
+      "trigger": "manual"
+    },
+    "trace_id": "trace-manual",
+    "build": "dev",
+    "origin": "manual",
+    "synthetic": true
+  }
+}"#
+        );
+    }
+
+    #[test]
     fn normalizes_scheduled_job_into_job_event_with_optional_command_payload() {
         let normalizer = EventNormalizer::new();
         let mut input = ScheduledJobInput::new(
@@ -908,5 +989,40 @@ mod tests {
             err,
             EventNormalizationError::MissingTelegramMessage
         ));
+    }
+
+    #[test]
+    fn callback_updates_prefer_callback_data_as_command_source() {
+        let normalizer = EventNormalizer::new();
+        let input = TelegramUpdateInput {
+            event_id: Some("evt_callback_source".to_owned()),
+            update_id: 8,
+            update_type: UpdateType::CallbackQuery,
+            received_at: ts(),
+            execution_mode: ExecutionMode::Realtime,
+            chat: chat(),
+            sender: Some(sender()),
+            message: Some(message("button label")),
+            reply: None,
+            callback: Some(CallbackContext {
+                query_id: "cbq-1".to_owned(),
+                data: Some("/undo -dry".to_owned()),
+                message_id: Some(777),
+                origin_chat_id: Some(-100123),
+                from_user_id: 42,
+            }),
+            locale: None,
+            trace_id: None,
+            build: None,
+        };
+
+        let event = normalizer
+            .normalize_telegram(input)
+            .expect("callback normalization must succeed");
+
+        assert_eq!(
+            event.command_source(),
+            Some(CommandSource::CallbackData("/undo -dry"))
+        );
     }
 }

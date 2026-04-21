@@ -1,4 +1,5 @@
 use crate::event::EventContext;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -15,13 +16,13 @@ impl TargetSelectorParser {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedTarget {
     pub selector: ParsedTargetSelector,
     pub source: TargetSource,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TargetSource {
     ExplicitPositional,
     SelectorFlag,
@@ -29,7 +30,7 @@ pub enum TargetSource {
     ImplicitContext,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ParsedTargetSelector {
     Reply,
     Username { username: String },
@@ -38,7 +39,7 @@ pub enum ParsedTargetSelector {
     JsonSelector { raw: Value },
 }
 
-#[derive(Debug, Error, Eq, PartialEq)]
+#[derive(Debug, Clone, Error, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TargetParseError {
     #[error("target input is empty")]
     EmptyInput,

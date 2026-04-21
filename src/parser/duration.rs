@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -15,7 +16,7 @@ impl DurationParser {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ParsedDuration {
     pub value: u64,
     pub unit: DurationUnit,
@@ -27,7 +28,7 @@ impl ParsedDuration {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DurationUnit {
     Seconds,
     Minutes,
@@ -59,7 +60,7 @@ impl DurationUnit {
     }
 }
 
-#[derive(Debug, Error, Eq, PartialEq)]
+#[derive(Debug, Clone, Error, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DurationParseError {
     #[error("duration input is empty")]
     EmptyInput,

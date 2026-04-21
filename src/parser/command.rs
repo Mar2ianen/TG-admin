@@ -4,6 +4,7 @@ use crate::parser::target::{
     ParsedTargetSelector, ResolvedTarget, TargetParseError, parse_target_selector, resolve_target,
 };
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -23,7 +24,7 @@ impl CommandParser {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ParsedCommandLine {
     pub command: CommandAst,
     pub pipe: Option<Box<ParsedCommandLine>>,
@@ -31,7 +32,7 @@ pub struct ParsedCommandLine {
     pub synthetic: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CommandAst {
     Warn(ModerationCommand),
     Mute(MuteCommand),
@@ -41,7 +42,7 @@ pub enum CommandAst {
     Msg(MessageCommand),
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CommandName {
     Warn,
     Mute,
@@ -65,7 +66,7 @@ impl CommandName {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModerationCommand {
     pub name: CommandName,
     pub target: ResolvedTarget,
@@ -73,7 +74,7 @@ pub struct ModerationCommand {
     pub flags: ModerationFlags,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MuteCommand {
     pub target: ResolvedTarget,
     pub duration: ParsedDuration,
@@ -81,7 +82,7 @@ pub struct MuteCommand {
     pub flags: ModerationFlags,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeleteCommand {
     pub target: ResolvedTarget,
     pub window: DeleteWindow,
@@ -90,13 +91,13 @@ pub struct DeleteCommand {
     pub flags: DeleteFlags,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct DeleteWindow {
     pub up: u16,
     pub down: u16,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModerationFlags {
     pub silent: bool,
     pub public_notice: bool,
@@ -105,24 +106,24 @@ pub struct ModerationFlags {
     pub force: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct DeleteFlags {
     pub dry_run: bool,
     pub force: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct UndoCommand {
     pub dry_run: bool,
     pub force: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MessageCommand {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ReasonExpr {
     RuleCode(String),
     Alias(String),
@@ -130,7 +131,7 @@ pub enum ReasonExpr {
     FreeText(String),
 }
 
-#[derive(Debug, Error, Eq, PartialEq)]
+#[derive(Debug, Clone, Error, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CommandParseError {
     #[error("command input is empty")]
     EmptyInput,
