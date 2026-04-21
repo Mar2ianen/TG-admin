@@ -1,0 +1,28 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Containerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      CARGO_TARGET_DIR: /workspace/target
+      CARGO_INCREMENTAL: "1"
+    command: bash
+    stdin_open: true
+    tty: true
+    init: true
+
+  test:
+    build:
+      context: .
+      dockerfile: Containerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      CARGO_TARGET_DIR: /workspace/target
+      CARGO_INCREMENTAL: "1"
+    command: cargo test
+    init: true
