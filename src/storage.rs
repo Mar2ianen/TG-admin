@@ -305,6 +305,35 @@ pub struct ProcessedUpdateRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageJournalRecord {
+    pub chat_id: i64,
+    pub message_id: i64,
+    pub user_id: Option<i64>,
+    pub date_utc: String,
+    pub update_type: String,
+    pub text: Option<String>,
+    pub normalized_text: Option<String>,
+    pub has_media: bool,
+    pub reply_to_message_id: Option<i64>,
+    pub file_ids_json: Option<String>,
+    pub meta_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AuditLogFilter {
+    pub action_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub request_id: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub trigger_message_id: Option<i64>,
+    pub actor_user_id: Option<i64>,
+    pub chat_id: Option<i64>,
+    pub op: Option<String>,
+    pub target_id: Option<String>,
+    pub reversible: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobRecord {
     pub job_id: String,
     pub executor_unit: String,
@@ -570,6 +599,133 @@ impl StorageConnection {
         Ok(inserted > 0)
     }
 
+    pub fn append_message_journal(
+        &self,
+        record: &MessageJournalRecord,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "INSERT INTO message_journal (
+                 chat_id, message_id, user_id, date_utc, update_type, text,
+                 normalized_text, has_media, reply_to_message_id, file_ids_json, meta_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                 user_id = excluded.user_id,
+                 date_utc = excluded.date_utc,
+                 update_type = excluded.update_type,
+                 text = excluded.text,
+                 normalized_text = excluded.normalized_text,
+                 has_media = excluded.has_media,
+                 reply_to_message_id = excluded.reply_to_message_id,
+                 file_ids_json = excluded.file_ids_json,
+                 meta_json = excluded.meta_json",
+            params![
+                record.chat_id,
+                record.message_id,
+                record.user_id,
+                record.date_utc,
+                record.update_type,
+                record.text,
+                record.normalized_text,
+                bool_to_sqlite(record.has_media),
+                record.reply_to_message_id,
+                record.file_ids_json,
+                record.meta_json,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn message_window(
+        &self,
+        chat_id: i64,
+        anchor_message_id: i64,
+        up: usize,
+        down: usize,
+        include_anchor: bool,
+    ) -> Result<Vec<MessageJournalRecord>, StorageError> {
+        let mut before_statement = self.connection.prepare(
+            "SELECT chat_id, message_id, user_id, date_utc, update_type, text,
+                    normalized_text, has_media, reply_to_message_id, file_ids_json, meta_json
+             FROM message_journal
+             WHERE chat_id = ?1 AND message_id < ?2
+             ORDER BY message_id DESC
+             LIMIT ?3",
+        )?;
+        let mut before = before_statement
+            .query_map(
+                params![chat_id, anchor_message_id, up],
+                map_message_journal_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)?;
+        before.reverse();
+
+        let anchor = if include_anchor {
+            let mut anchor_statement = self.connection.prepare(
+                "SELECT chat_id, message_id, user_id, date_utc, update_type, text,
+                        normalized_text, has_media, reply_to_message_id, file_ids_json, meta_json
+                 FROM message_journal
+                 WHERE chat_id = ?1 AND message_id = ?2",
+            )?;
+            anchor_statement
+                .query_row(params![chat_id, anchor_message_id], map_message_journal_row)
+                .optional()
+                .map_err(StorageError::from)?
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let mut after_statement = self.connection.prepare(
+            "SELECT chat_id, message_id, user_id, date_utc, update_type, text,
+                    normalized_text, has_media, reply_to_message_id, file_ids_json, meta_json
+             FROM message_journal
+             WHERE chat_id = ?1 AND message_id > ?2
+             ORDER BY message_id ASC
+             LIMIT ?3",
+        )?;
+        let after = after_statement
+            .query_map(
+                params![chat_id, anchor_message_id, down],
+                map_message_journal_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)?;
+
+        let mut messages = before;
+        messages.extend(anchor);
+        messages.extend(after);
+        Ok(messages)
+    }
+
+    pub fn messages_by_user(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        since: &str,
+        limit: usize,
+    ) -> Result<Vec<MessageJournalRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT chat_id, message_id, user_id, date_utc, update_type, text,
+                    normalized_text, has_media, reply_to_message_id, file_ids_json, meta_json
+             FROM message_journal
+             WHERE chat_id = ?1 AND user_id = ?2 AND date_utc >= ?3
+             ORDER BY date_utc DESC, message_id DESC
+             LIMIT ?4",
+        )?;
+
+        statement
+            .query_map(
+                params![chat_id, user_id, since, limit],
+                map_message_journal_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
     pub fn get_job(&self, job_id: &str) -> Result<Option<JobRecord>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT job_id, executor_unit, run_at, scheduled_at, status, dedupe_key,
@@ -646,6 +802,52 @@ impl StorageConnection {
 
         statement
             .query_map(params![idempotency_key], map_audit_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub fn find_audit_entries(
+        &self,
+        filter: &AuditLogFilter,
+        limit: usize,
+    ) -> Result<Vec<AuditLogEntry>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT action_id, trace_id, request_id, unit_name, execution_mode, op,
+                    actor_user_id, chat_id, target_kind, target_id, trigger_message_id,
+                    idempotency_key, reversible, compensation_json, args_json,
+                    result_json, created_at
+             FROM audit_log
+             WHERE (?1 IS NULL OR action_id = ?1)
+               AND (?2 IS NULL OR trace_id = ?2)
+               AND (?3 IS NULL OR request_id = ?3)
+               AND (?4 IS NULL OR idempotency_key = ?4)
+               AND (?5 IS NULL OR trigger_message_id = ?5)
+               AND (?6 IS NULL OR actor_user_id = ?6)
+               AND (?7 IS NULL OR chat_id = ?7)
+               AND (?8 IS NULL OR op = ?8)
+               AND (?9 IS NULL OR target_id = ?9)
+               AND (?10 IS NULL OR reversible = ?10)
+             ORDER BY created_at DESC, action_id DESC
+             LIMIT ?11",
+        )?;
+
+        statement
+            .query_map(
+                params![
+                    filter.action_id,
+                    filter.trace_id,
+                    filter.request_id,
+                    filter.idempotency_key,
+                    filter.trigger_message_id,
+                    filter.actor_user_id,
+                    filter.chat_id,
+                    filter.op,
+                    filter.target_id,
+                    filter.reversible.map(bool_to_sqlite),
+                    limit,
+                ],
+                map_audit_row,
+            )?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StorageError::from)
     }
@@ -770,6 +972,22 @@ fn map_processed_update_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Process
         event_id: row.get(1)?,
         processed_at: row.get(2)?,
         execution_mode: row.get(3)?,
+    })
+}
+
+fn map_message_journal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageJournalRecord> {
+    Ok(MessageJournalRecord {
+        chat_id: row.get(0)?,
+        message_id: row.get(1)?,
+        user_id: row.get(2)?,
+        date_utc: row.get(3)?,
+        update_type: row.get(4)?,
+        text: row.get(5)?,
+        normalized_text: row.get(6)?,
+        has_media: sqlite_to_bool(row.get(7)?),
+        reply_to_message_id: row.get(8)?,
+        file_ids_json: row.get(9)?,
+        meta_json: row.get(10)?,
     })
 }
 

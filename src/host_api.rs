@@ -7,10 +7,21 @@ use crate::parser::reason::{ExpandedReason, ReasonAliasRegistry};
 use crate::parser::target::{
     ParsedTargetSelector, ResolvedTarget, TargetParseError, TargetSelectorParser, resolve_target,
 };
-use crate::storage::{KvEntry, StorageConnection, StorageError, UserPatch, UserRecord};
+use crate::storage::{
+    AuditLogEntry, AuditLogFilter, JobRecord, KvEntry, MessageJournalRecord, StorageConnection,
+    StorageError, UserPatch, UserRecord,
+};
 use crate::unit::{UnitDiagnostic, UnitRegistry, UnitRegistryStatus, UnitStatus};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use thiserror::Error;
+use uuid::Uuid;
+
+const MAX_MSG_WINDOW: usize = 200;
+const MAX_MSG_BY_USER_LIMIT: usize = 200;
+const MAX_AUDIT_FIND_LIMIT: usize = 200;
+const MAX_JOB_DELAY_DAYS: i64 = 365;
 
 #[derive(Debug, Clone)]
 pub struct HostApi {
@@ -96,6 +107,21 @@ impl HostApi {
             HostApiRequest::DbKvSet(request) => self
                 .db_kv_set(event, request)
                 .map(|response| response.map(HostApiValue::DbKvSet)),
+            HostApiRequest::MsgWindow(request) => self
+                .msg_window(event, request)
+                .map(|response| response.map(HostApiValue::MsgWindow)),
+            HostApiRequest::MsgByUser(request) => self
+                .msg_by_user(event, request)
+                .map(|response| response.map(HostApiValue::MsgByUser)),
+            HostApiRequest::JobScheduleAfter(request) => self
+                .job_schedule_after(event, request)
+                .map(|response| response.map(HostApiValue::JobScheduleAfter)),
+            HostApiRequest::AuditFind(request) => self
+                .audit_find(event, request)
+                .map(|response| response.map(HostApiValue::AuditFind)),
+            HostApiRequest::AuditCompensate(request) => self
+                .audit_compensate(event, request)
+                .map(|response| response.map(HostApiValue::AuditCompensate)),
             HostApiRequest::UnitStatus(request) => self
                 .unit_status(event, request)
                 .map(|response| response.map(HostApiValue::UnitStatus)),
@@ -358,6 +384,220 @@ impl HostApi {
         ))
     }
 
+    pub fn msg_window(
+        &self,
+        event: &EventContext,
+        request: MsgWindowRequest,
+    ) -> Result<HostApiResponse<MsgWindowValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MsgWindow)?;
+        self.require_capability(event, HostApiOperation::MsgWindow, "msg.history.read")?;
+        validate_msg_window_request(&request, HostApiOperation::MsgWindow)?;
+
+        let messages = self
+            .storage(HostApiOperation::MsgWindow)?
+            .message_window(
+                request.chat_id,
+                request.anchor_message_id,
+                request.up,
+                request.down,
+                request.include_anchor,
+            )
+            .map_err(|source| storage_error(HostApiOperation::MsgWindow, source))?;
+
+        Ok(self.response(HostApiOperation::MsgWindow, MsgWindowValue { messages }))
+    }
+
+    pub fn msg_by_user(
+        &self,
+        event: &EventContext,
+        request: MsgByUserRequest,
+    ) -> Result<HostApiResponse<MsgByUserValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MsgByUser)?;
+        self.require_capability(event, HostApiOperation::MsgByUser, "msg.history.read")?;
+        validate_msg_by_user_request(&request, HostApiOperation::MsgByUser)?;
+
+        let messages = self
+            .storage(HostApiOperation::MsgByUser)?
+            .messages_by_user(
+                request.chat_id,
+                request.user_id,
+                &request.since,
+                request.limit,
+            )
+            .map_err(|source| storage_error(HostApiOperation::MsgByUser, source))?;
+
+        Ok(self.response(HostApiOperation::MsgByUser, MsgByUserValue { messages }))
+    }
+
+    pub fn job_schedule_after(
+        &self,
+        event: &EventContext,
+        request: JobScheduleAfterRequest,
+    ) -> Result<HostApiResponse<JobScheduleAfterValue>, HostApiError> {
+        validate_event(event, HostApiOperation::JobScheduleAfter)?;
+        self.require_capability(event, HostApiOperation::JobScheduleAfter, "job.schedule")?;
+        validate_job_schedule_request(&request, HostApiOperation::JobScheduleAfter)?;
+
+        let parsed_delay = self
+            .duration_parser
+            .parse(request.delay.trim())
+            .map_err(|source| {
+                HostApiError::parse(
+                    HostApiOperation::JobScheduleAfter,
+                    HostApiErrorDetail::InvalidDuration {
+                        value: request.delay.clone(),
+                        source,
+                    },
+                )
+            })?;
+        let delay = duration_to_chrono(parsed_delay, HostApiOperation::JobScheduleAfter)?;
+        if delay > ChronoDuration::days(MAX_JOB_DELAY_DAYS) {
+            return Err(HostApiError::validation(
+                HostApiOperation::JobScheduleAfter,
+                HostApiErrorDetail::JobTooFarInFuture {
+                    delay: request.delay,
+                    max_days: MAX_JOB_DELAY_DAYS,
+                },
+            ));
+        }
+
+        let scheduled_at = event.received_at;
+        let run_at = scheduled_at + delay;
+        let job = JobRecord {
+            job_id: format!("job_{}", Uuid::new_v4().simple()),
+            executor_unit: request.executor_unit,
+            run_at: to_rfc3339(run_at),
+            scheduled_at: to_rfc3339(scheduled_at),
+            status: "scheduled".to_owned(),
+            dedupe_key: request.dedupe_key,
+            payload_json: request.payload.to_string(),
+            retry_count: 0,
+            max_retries: request.max_retries.unwrap_or(0),
+            last_error_code: None,
+            last_error_text: None,
+            audit_action_id: request.audit_action_id,
+            created_at: to_rfc3339(scheduled_at),
+            updated_at: to_rfc3339(scheduled_at),
+        };
+
+        if !self.dry_run {
+            self.storage(HostApiOperation::JobScheduleAfter)?
+                .insert_job(&job)
+                .map_err(|source| storage_error(HostApiOperation::JobScheduleAfter, source))?;
+        }
+
+        Ok(self.response(
+            HostApiOperation::JobScheduleAfter,
+            JobScheduleAfterValue { job },
+        ))
+    }
+
+    pub fn audit_find(
+        &self,
+        event: &EventContext,
+        request: AuditFindRequest,
+    ) -> Result<HostApiResponse<AuditFindValue>, HostApiError> {
+        validate_event(event, HostApiOperation::AuditFind)?;
+        self.require_capability(event, HostApiOperation::AuditFind, "audit.read")?;
+        validate_audit_find_request(&request, HostApiOperation::AuditFind)?;
+
+        let entries = self
+            .storage(HostApiOperation::AuditFind)?
+            .find_audit_entries(&request.filters, request.limit)
+            .map_err(|source| storage_error(HostApiOperation::AuditFind, source))?;
+
+        Ok(self.response(HostApiOperation::AuditFind, AuditFindValue { entries }))
+    }
+
+    pub fn audit_compensate(
+        &self,
+        event: &EventContext,
+        request: AuditCompensateRequest,
+    ) -> Result<HostApiResponse<AuditCompensateValue>, HostApiError> {
+        validate_event(event, HostApiOperation::AuditCompensate)?;
+        self.require_capability(event, HostApiOperation::AuditCompensate, "audit.compensate")?;
+        validate_non_empty(
+            &request.action_id,
+            "action_id",
+            HostApiOperation::AuditCompensate,
+        )?;
+
+        let storage = self.storage(HostApiOperation::AuditCompensate)?;
+        let original = storage
+            .get_audit_entry(&request.action_id)
+            .map_err(|source| storage_error(HostApiOperation::AuditCompensate, source))?
+            .ok_or_else(|| {
+                HostApiError::validation(
+                    HostApiOperation::AuditCompensate,
+                    HostApiErrorDetail::UnknownAuditAction {
+                        action_id: request.action_id.clone(),
+                    },
+                )
+            })?;
+
+        if !original.reversible || original.compensation_json.is_none() {
+            return Ok(self.response(
+                HostApiOperation::AuditCompensate,
+                AuditCompensateValue {
+                    compensated: false,
+                    new_action_id: None,
+                },
+            ));
+        }
+
+        let new_action_id = format!("act_{}", Uuid::new_v4().simple());
+        let compensation_entry = AuditLogEntry {
+            action_id: new_action_id.clone(),
+            trace_id: event
+                .system
+                .trace_id
+                .clone()
+                .or_else(|| original.trace_id.clone()),
+            request_id: None,
+            unit_name: event
+                .system
+                .unit
+                .as_ref()
+                .map(|unit| unit.id.clone())
+                .unwrap_or_else(|| original.unit_name.clone()),
+            execution_mode: execution_mode_label(event),
+            op: "audit.compensate".to_owned(),
+            actor_user_id: event
+                .sender
+                .as_ref()
+                .map(|sender| sender.id)
+                .or(original.actor_user_id),
+            chat_id: event.chat.as_ref().map(|chat| chat.id).or(original.chat_id),
+            target_kind: Some("audit_action".to_owned()),
+            target_id: Some(original.action_id.clone()),
+            trigger_message_id: event.message.as_ref().map(|message| i64::from(message.id)),
+            idempotency_key: Some(format!("compensate:{}", original.action_id)),
+            reversible: false,
+            compensation_json: None,
+            args_json: json!({
+                "action_id": original.action_id,
+                "recipe": original.compensation_json,
+            })
+            .to_string(),
+            result_json: Some(json!({ "compensated": true }).to_string()),
+            created_at: to_rfc3339(event.received_at),
+        };
+
+        if !self.dry_run {
+            storage
+                .append_audit_entry(&compensation_entry)
+                .map_err(|source| storage_error(HostApiOperation::AuditCompensate, source))?;
+        }
+
+        Ok(self.response(
+            HostApiOperation::AuditCompensate,
+            AuditCompensateValue {
+                compensated: true,
+                new_action_id: Some(new_action_id),
+            },
+        ))
+    }
+
     fn storage(&self, operation: HostApiOperation) -> Result<&StorageConnection, HostApiError> {
         self.storage.as_deref().ok_or_else(|| {
             HostApiError::internal(
@@ -386,6 +626,63 @@ impl HostApi {
             dry_run: self.dry_run,
             value,
         }
+    }
+
+    fn require_capability(
+        &self,
+        event: &EventContext,
+        operation: HostApiOperation,
+        capability: &'static str,
+    ) -> Result<(), HostApiError> {
+        let Some(unit) = event.system.unit.as_ref() else {
+            return Ok(());
+        };
+        let Some(registry) = self.unit_registry.as_deref() else {
+            return Ok(());
+        };
+        let descriptor = registry.get(&unit.id).ok_or_else(|| {
+            HostApiError::validation(
+                operation,
+                HostApiErrorDetail::UnknownUnit {
+                    unit_id: unit.id.clone(),
+                },
+            )
+        })?;
+        let capabilities = descriptor
+            .manifest
+            .as_ref()
+            .map(|manifest| &manifest.capabilities)
+            .ok_or_else(|| {
+                HostApiError::validation(
+                    operation,
+                    HostApiErrorDetail::UnknownUnit {
+                        unit_id: unit.id.clone(),
+                    },
+                )
+            })?;
+
+        if capabilities.deny.iter().any(|value| value == capability) {
+            return Err(HostApiError::denied(
+                operation,
+                HostApiErrorDetail::CapabilityDenied {
+                    capability: capability.to_owned(),
+                    unit_id: unit.id.clone(),
+                },
+            ));
+        }
+        if !capabilities.allow.is_empty()
+            && !capabilities.allow.iter().any(|value| value == capability)
+        {
+            return Err(HostApiError::denied(
+                operation,
+                HostApiErrorDetail::CapabilityDenied {
+                    capability: capability.to_owned(),
+                    unit_id: unit.id.clone(),
+                },
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -480,6 +777,154 @@ fn validate_kv_entry(entry: &KvEntry, operation: HostApiOperation) -> Result<(),
     Ok(())
 }
 
+fn validate_msg_window_request(
+    request: &MsgWindowRequest,
+    operation: HostApiOperation,
+) -> Result<(), HostApiError> {
+    if request.chat_id == 0 {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::InvalidField {
+                field: "chat_id".to_owned(),
+                message: "must be non-zero".to_owned(),
+            },
+        ));
+    }
+    if request.anchor_message_id <= 0 {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::InvalidField {
+                field: "anchor_message_id".to_owned(),
+                message: "must be positive".to_owned(),
+            },
+        ));
+    }
+    let total = request.up + request.down + usize::from(request.include_anchor);
+    if total > MAX_MSG_WINDOW {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::MessageWindowTooLarge {
+                requested: total,
+                max: MAX_MSG_WINDOW,
+            },
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_msg_by_user_request(
+    request: &MsgByUserRequest,
+    operation: HostApiOperation,
+) -> Result<(), HostApiError> {
+    if request.chat_id == 0 {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::InvalidField {
+                field: "chat_id".to_owned(),
+                message: "must be non-zero".to_owned(),
+            },
+        ));
+    }
+    validate_user_id(request.user_id, operation)?;
+    validate_non_empty(&request.since, "since", operation)?;
+    parse_rfc3339(&request.since, operation, "since")?;
+    if request.limit == 0 || request.limit > MAX_MSG_BY_USER_LIMIT {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::InvalidField {
+                field: "limit".to_owned(),
+                message: format!("must be between 1 and {MAX_MSG_BY_USER_LIMIT}"),
+            },
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_job_schedule_request(
+    request: &JobScheduleAfterRequest,
+    operation: HostApiOperation,
+) -> Result<(), HostApiError> {
+    validate_non_empty(&request.delay, "delay", operation)?;
+    validate_non_empty(&request.executor_unit, "executor_unit", operation)?;
+    if let Some(dedupe_key) = request.dedupe_key.as_deref() {
+        validate_non_empty(dedupe_key, "dedupe_key", operation)?;
+    }
+    if let Some(audit_action_id) = request.audit_action_id.as_deref() {
+        validate_non_empty(audit_action_id, "audit_action_id", operation)?;
+    }
+    if let Some(max_retries) = request.max_retries
+        && max_retries < 0
+    {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::InvalidField {
+                field: "max_retries".to_owned(),
+                message: "must be non-negative".to_owned(),
+            },
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_audit_find_request(
+    request: &AuditFindRequest,
+    operation: HostApiOperation,
+) -> Result<(), HostApiError> {
+    if request.limit == 0 || request.limit > MAX_AUDIT_FIND_LIMIT {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::InvalidField {
+                field: "limit".to_owned(),
+                message: format!("must be between 1 and {MAX_AUDIT_FIND_LIMIT}"),
+            },
+        ));
+    }
+    if request.filters.action_id.is_none()
+        && request.filters.trace_id.is_none()
+        && request.filters.request_id.is_none()
+        && request.filters.idempotency_key.is_none()
+        && request.filters.trigger_message_id.is_none()
+        && request.filters.actor_user_id.is_none()
+        && request.filters.chat_id.is_none()
+        && request.filters.op.is_none()
+        && request.filters.target_id.is_none()
+        && request.filters.reversible.is_none()
+    {
+        return Err(HostApiError::validation(
+            operation,
+            HostApiErrorDetail::MissingAuditFilter,
+        ));
+    }
+
+    validate_optional_non_empty(&request.filters.action_id, "filters.action_id", operation)?;
+    validate_optional_non_empty(&request.filters.trace_id, "filters.trace_id", operation)?;
+    validate_optional_non_empty(&request.filters.request_id, "filters.request_id", operation)?;
+    validate_optional_non_empty(
+        &request.filters.idempotency_key,
+        "filters.idempotency_key",
+        operation,
+    )?;
+    validate_optional_non_empty(&request.filters.op, "filters.op", operation)?;
+    validate_optional_non_empty(&request.filters.target_id, "filters.target_id", operation)?;
+
+    Ok(())
+}
+
+fn validate_optional_non_empty(
+    value: &Option<String>,
+    field: &'static str,
+    operation: HostApiOperation,
+) -> Result<(), HostApiError> {
+    if let Some(value) = value.as_deref() {
+        validate_non_empty(value, field, operation)?;
+    }
+
+    Ok(())
+}
+
 fn storage_error(operation: HostApiOperation, source: StorageError) -> HostApiError {
     HostApiError::internal(
         operation,
@@ -487,6 +932,52 @@ fn storage_error(operation: HostApiOperation, source: StorageError) -> HostApiEr
             message: source.to_string(),
         },
     )
+}
+
+fn duration_to_chrono(
+    parsed: ParsedDuration,
+    operation: HostApiOperation,
+) -> Result<ChronoDuration, HostApiError> {
+    ChronoDuration::from_std(parsed.into_std()).map_err(|error| {
+        HostApiError::internal(
+            operation,
+            HostApiErrorDetail::InternalConversionFailure {
+                message: error.to_string(),
+            },
+        )
+    })
+}
+
+fn to_rfc3339(value: DateTime<Utc>) -> String {
+    value.to_rfc3339()
+}
+
+fn parse_rfc3339(
+    value: &str,
+    operation: HostApiOperation,
+    field: &'static str,
+) -> Result<DateTime<Utc>, HostApiError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .map_err(|error| {
+            HostApiError::validation(
+                operation,
+                HostApiErrorDetail::InvalidField {
+                    field: field.to_owned(),
+                    message: format!("must be RFC3339 timestamp: {error}"),
+                },
+            )
+        })
+}
+
+fn execution_mode_label(event: &EventContext) -> String {
+    match event.execution_mode {
+        crate::event::ExecutionMode::Realtime => "realtime",
+        crate::event::ExecutionMode::Recovery => "recovery",
+        crate::event::ExecutionMode::Scheduled => "scheduled",
+        crate::event::ExecutionMode::Manual => "manual",
+    }
+    .to_owned()
 }
 
 fn apply_user_patch(current: Option<&UserRecord>, patch: &UserPatch) -> UserRecord {
@@ -605,6 +1096,11 @@ pub enum HostApiRequest {
     DbUserIncr(DbUserIncrRequest),
     DbKvGet(DbKvGetRequest),
     DbKvSet(DbKvSetRequest),
+    MsgWindow(MsgWindowRequest),
+    MsgByUser(MsgByUserRequest),
+    JobScheduleAfter(JobScheduleAfterRequest),
+    AuditFind(AuditFindRequest),
+    AuditCompensate(AuditCompensateRequest),
     UnitStatus(UnitStatusRequest),
 }
 
@@ -619,6 +1115,11 @@ pub enum HostApiValue {
     DbUserIncr(DbUserIncrValue),
     DbKvGet(DbKvGetValue),
     DbKvSet(DbKvSetValue),
+    MsgWindow(MsgWindowValue),
+    MsgByUser(MsgByUserValue),
+    JobScheduleAfter(JobScheduleAfterValue),
+    AuditFind(AuditFindValue),
+    AuditCompensate(AuditCompensateValue),
     UnitStatus(UnitStatusValue),
 }
 
@@ -634,6 +1135,11 @@ pub enum HostApiOperation {
     DbUserIncr,
     DbKvGet,
     DbKvSet,
+    MsgWindow,
+    MsgByUser,
+    JobScheduleAfter,
+    AuditFind,
+    AuditCompensate,
     UnitStatus,
 }
 
@@ -712,6 +1218,44 @@ pub struct DbKvSetRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MsgWindowRequest {
+    pub chat_id: i64,
+    pub anchor_message_id: i64,
+    pub up: usize,
+    pub down: usize,
+    pub include_anchor: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MsgByUserRequest {
+    pub chat_id: i64,
+    pub user_id: i64,
+    pub since: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct JobScheduleAfterRequest {
+    pub delay: String,
+    pub executor_unit: String,
+    pub payload: Value,
+    pub dedupe_key: Option<String>,
+    pub max_retries: Option<i64>,
+    pub audit_action_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuditFindRequest {
+    pub filters: AuditLogFilter,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuditCompensateRequest {
+    pub action_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UnitStatusRequest {
     pub unit_id: Option<String>,
 }
@@ -739,6 +1283,32 @@ pub struct DbKvGetValue {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DbKvSetValue {
     pub entry: KvEntry,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MsgWindowValue {
+    pub messages: Vec<MessageJournalRecord>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MsgByUserValue {
+    pub messages: Vec<MessageJournalRecord>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct JobScheduleAfterValue {
+    pub job: JobRecord,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuditFindValue {
+    pub entries: Vec<AuditLogEntry>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AuditCompensateValue {
+    pub compensated: bool,
+    pub new_action_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -795,6 +1365,14 @@ impl HostApiError {
         }
     }
 
+    fn denied(operation: HostApiOperation, detail: HostApiErrorDetail) -> Self {
+        Self {
+            operation,
+            kind: HostApiErrorKind::Denied,
+            detail,
+        }
+    }
+
     fn internal(operation: HostApiOperation, detail: HostApiErrorDetail) -> Self {
         Self {
             operation,
@@ -837,12 +1415,24 @@ pub enum HostApiErrorDetail {
         current: i64,
         delta: i64,
     },
+    #[error("message window too large: requested {requested}, max {max}")]
+    MessageWindowTooLarge { requested: usize, max: usize },
+    #[error("scheduled job delay `{delay}` exceeds max {max_days} days")]
+    JobTooFarInFuture { delay: String, max_days: i64 },
+    #[error("audit.find requires at least one filter")]
+    MissingAuditFilter,
     #[error("unknown unit `{unit_id}`")]
     UnknownUnit { unit_id: String },
+    #[error("operation denied for unit `{unit_id}`: missing capability `{capability}`")]
+    CapabilityDenied { capability: String, unit_id: String },
+    #[error("unknown audit action `{action_id}`")]
+    UnknownAuditAction { action_id: String },
     #[error("required host resource `{resource}` is unavailable")]
     ResourceUnavailable { resource: String },
     #[error("storage failure: {message}")]
     StorageFailure { message: String },
+    #[error("internal conversion failed: {message}")]
+    InternalConversionFailure { message: String },
     #[error("reason expansion unexpectedly returned no result")]
     ReasonExpansionUnavailable,
 }
@@ -850,10 +1440,11 @@ pub enum HostApiErrorDetail {
 #[cfg(test)]
 mod tests {
     use super::{
-        CtxExpandReasonRequest, CtxParseDurationRequest, CtxResolveTargetRequest, DbKvGetRequest,
-        DbKvSetRequest, DbUserGetRequest, DbUserIncrRequest, DbUserPatchRequest, HostApi,
-        HostApiError, HostApiErrorDetail, HostApiErrorKind, HostApiOperation, HostApiRequest,
-        HostApiValue, UnitStatusEntry, UnitStatusRequest,
+        AuditCompensateRequest, AuditFindRequest, CtxExpandReasonRequest, CtxParseDurationRequest,
+        CtxResolveTargetRequest, DbKvGetRequest, DbKvSetRequest, DbUserGetRequest,
+        DbUserIncrRequest, DbUserPatchRequest, HostApi, HostApiError, HostApiErrorDetail,
+        HostApiErrorKind, HostApiOperation, HostApiRequest, HostApiValue, JobScheduleAfterRequest,
+        MsgByUserRequest, MsgWindowRequest, UnitStatusEntry, UnitStatusRequest,
     };
     use crate::event::{
         ChatContext, EventContext, EventNormalizer, ExecutionMode, ManualInvocationInput,
@@ -863,11 +1454,15 @@ mod tests {
     use crate::parser::duration::{DurationParseError, DurationUnit, ParsedDuration};
     use crate::parser::reason::{ExpandedReason, ReasonAliasDefinition, ReasonAliasRegistry};
     use crate::parser::target::{ParsedTargetSelector, TargetParseError, TargetSource};
-    use crate::storage::{KvEntry, Storage, UserPatch};
+    use crate::storage::{
+        AuditLogEntry, AuditLogFilter, KvEntry, MessageJournalRecord, Storage, UserPatch,
+    };
     use crate::unit::{
-        ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry, UnitStatus,
+        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
+        UnitStatus,
     };
     use chrono::{TimeZone, Utc};
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn ts() -> chrono::DateTime<Utc> {
@@ -922,6 +1517,34 @@ mod tests {
         (dir, HostApi::new(true).with_storage(storage))
     }
 
+    fn storage_api_with_registry(
+        allow: &[&str],
+        deny: &[&str],
+        dry_run: bool,
+    ) -> (TempDir, HostApi) {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
+        let path = dir.path().join("host-api.sqlite3");
+        let storage = Storage::new(path)
+            .init()
+            .unwrap_or_else(|error| panic!("storage init failed: {error}"));
+
+        let mut manifest = UnitManifest::new(
+            UnitDefinition::new("moderation.test"),
+            TriggerSpec::command(["warn"]),
+            ServiceSpec::new("cargo run"),
+        );
+        manifest.capabilities = CapabilitiesSpec {
+            allow: allow.iter().map(|value| (*value).to_owned()).collect(),
+            deny: deny.iter().map(|value| (*value).to_owned()).collect(),
+        };
+        let registry = UnitRegistry::load_manifests(vec![manifest]).registry;
+
+        let api = HostApi::new(dry_run)
+            .with_storage(storage)
+            .with_unit_registry(registry);
+        (dir, api)
+    }
+
     fn unit_registry_api() -> HostApi {
         let active = UnitManifest::new(
             UnitDefinition::new("moderation.warn"),
@@ -939,6 +1562,113 @@ mod tests {
         assert!(report.is_fully_valid());
 
         HostApi::new(false).with_unit_registry(report.registry)
+    }
+
+    fn seed_message_journal(api: &HostApi) {
+        let storage = api
+            .storage(HostApiOperation::MsgWindow)
+            .expect("storage available");
+        for (message_id, user_id, text, date_utc) in [
+            (
+                81229_i64,
+                Some(99887766_i64),
+                Some("spam 1"),
+                "2026-04-21T11:59:00Z",
+            ),
+            (
+                81230,
+                Some(99887766),
+                Some("spam 2"),
+                "2026-04-21T11:59:10Z",
+            ),
+            (
+                81231,
+                Some(99887766),
+                Some("spam 3"),
+                "2026-04-21T11:59:20Z",
+            ),
+            (
+                81232,
+                Some(99887766),
+                Some("spam 4"),
+                "2026-04-21T11:59:30Z",
+            ),
+            (
+                81233,
+                Some(99887766),
+                Some("spam 5"),
+                "2026-04-21T11:59:40Z",
+            ),
+            (81234, Some(42), Some("admin note"), "2026-04-21T12:05:00Z"),
+        ] {
+            storage
+                .append_message_journal(&MessageJournalRecord {
+                    chat_id: -100123,
+                    message_id,
+                    user_id,
+                    date_utc: date_utc.to_owned(),
+                    update_type: "message".to_owned(),
+                    text: text.map(str::to_owned),
+                    normalized_text: text.map(str::to_owned),
+                    has_media: false,
+                    reply_to_message_id: None,
+                    file_ids_json: None,
+                    meta_json: None,
+                })
+                .expect("seed message journal");
+        }
+    }
+
+    fn seed_audit_entries(api: &HostApi) {
+        let storage = api
+            .storage(HostApiOperation::AuditFind)
+            .expect("storage available");
+        for entry in [
+            AuditLogEntry {
+                action_id: "act_1".to_owned(),
+                trace_id: Some("trace-1".to_owned()),
+                request_id: Some("req-1".to_owned()),
+                unit_name: "moderation.test".to_owned(),
+                execution_mode: "manual".to_owned(),
+                op: "mute".to_owned(),
+                actor_user_id: Some(42),
+                chat_id: Some(-100123),
+                target_kind: Some("user".to_owned()),
+                target_id: Some("99887766".to_owned()),
+                trigger_message_id: Some(81231),
+                idempotency_key: Some("idem-1".to_owned()),
+                reversible: true,
+                compensation_json: Some(
+                    "{\"kind\":\"host_op\",\"op\":\"tg.unrestrict\"}".to_owned(),
+                ),
+                args_json: "{\"duration\":\"7d\"}".to_owned(),
+                result_json: Some("{\"ok\":true}".to_owned()),
+                created_at: "2026-04-21T12:00:00Z".to_owned(),
+            },
+            AuditLogEntry {
+                action_id: "act_2".to_owned(),
+                trace_id: Some("trace-2".to_owned()),
+                request_id: Some("req-2".to_owned()),
+                unit_name: "moderation.test".to_owned(),
+                execution_mode: "manual".to_owned(),
+                op: "del".to_owned(),
+                actor_user_id: Some(42),
+                chat_id: Some(-100123),
+                target_kind: Some("message".to_owned()),
+                target_id: Some("81231".to_owned()),
+                trigger_message_id: Some(81231),
+                idempotency_key: Some("idem-2".to_owned()),
+                reversible: false,
+                compensation_json: None,
+                args_json: "{\"count\":1}".to_owned(),
+                result_json: Some("{\"deleted\":1}".to_owned()),
+                created_at: "2026-04-21T12:01:00Z".to_owned(),
+            },
+        ] {
+            storage
+                .append_audit_entry(&entry)
+                .expect("seed audit entry");
+        }
     }
 
     #[test]
@@ -1369,6 +2099,270 @@ mod tests {
         assert_eq!(
             response.value.entry.expect("entry exists").value_json,
             "{\"mode\":\"strict\"}"
+        );
+    }
+
+    #[test]
+    fn msg_window_returns_anchor_window() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], false);
+        seed_message_journal(&api);
+
+        let response = api
+            .msg_window(
+                &event,
+                MsgWindowRequest {
+                    chat_id: -100123,
+                    anchor_message_id: 81231,
+                    up: 2,
+                    down: 2,
+                    include_anchor: true,
+                },
+            )
+            .expect("msg window succeeds");
+
+        assert_eq!(response.operation, HostApiOperation::MsgWindow);
+        assert_eq!(response.value.messages.len(), 5);
+        assert_eq!(response.value.messages[2].message_id, 81231);
+    }
+
+    #[test]
+    fn msg_window_rejects_oversized_request() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], false);
+
+        let error = api
+            .msg_window(
+                &event,
+                MsgWindowRequest {
+                    chat_id: -100123,
+                    anchor_message_id: 81231,
+                    up: 200,
+                    down: 1,
+                    include_anchor: true,
+                },
+            )
+            .expect_err("oversized msg window must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::MessageWindowTooLarge {
+                requested: 202,
+                max: 200,
+            }
+        );
+    }
+
+    #[test]
+    fn msg_by_user_returns_recent_messages_for_user() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], false);
+        seed_message_journal(&api);
+
+        let response = api
+            .msg_by_user(
+                &event,
+                MsgByUserRequest {
+                    chat_id: -100123,
+                    user_id: 99887766,
+                    since: "2026-04-21T11:59:05Z".to_owned(),
+                    limit: 3,
+                },
+            )
+            .expect("msg.by_user succeeds");
+
+        assert_eq!(response.operation, HostApiOperation::MsgByUser);
+        assert_eq!(response.value.messages.len(), 3);
+        assert_eq!(response.value.messages[0].message_id, 81233);
+    }
+
+    #[test]
+    fn job_schedule_after_dry_run_validates_without_mutation() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["job.schedule"], &[], true);
+
+        let response = api
+            .job_schedule_after(
+                &event,
+                JobScheduleAfterRequest {
+                    delay: "7d".to_owned(),
+                    executor_unit: "moderation.mute_release".to_owned(),
+                    payload: json!({"kind":"host_op","op":"tg.send_ui"}),
+                    dedupe_key: Some("mute:99887766".to_owned()),
+                    max_retries: Some(2),
+                    audit_action_id: Some("act_1".to_owned()),
+                },
+            )
+            .expect("dry-run schedule succeeds");
+
+        assert!(response.dry_run);
+        assert_eq!(response.value.job.status, "scheduled");
+        assert!(
+            api.storage(HostApiOperation::JobScheduleAfter)
+                .expect("storage")
+                .get_job(&response.value.job.job_id)
+                .expect("job lookup succeeds")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn job_schedule_after_rejects_too_distant_delay() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["job.schedule"], &[], false);
+
+        let error = api
+            .job_schedule_after(
+                &event,
+                JobScheduleAfterRequest {
+                    delay: "53w".to_owned(),
+                    executor_unit: "moderation.mute_release".to_owned(),
+                    payload: json!({"kind":"host_op"}),
+                    dedupe_key: None,
+                    max_retries: None,
+                    audit_action_id: None,
+                },
+            )
+            .expect_err("delay beyond 365 days must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::JobTooFarInFuture {
+                delay: "53w".to_owned(),
+                max_days: 365,
+            }
+        );
+    }
+
+    #[test]
+    fn audit_find_returns_matching_entries() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], false);
+        seed_audit_entries(&api);
+
+        let response = api
+            .audit_find(
+                &event,
+                AuditFindRequest {
+                    filters: AuditLogFilter {
+                        trigger_message_id: Some(81231),
+                        ..AuditLogFilter::default()
+                    },
+                    limit: 10,
+                },
+            )
+            .expect("audit.find succeeds");
+
+        assert_eq!(response.operation, HostApiOperation::AuditFind);
+        assert_eq!(response.value.entries.len(), 2);
+        assert_eq!(response.value.entries[0].action_id, "act_2");
+    }
+
+    #[test]
+    fn audit_find_requires_at_least_one_filter() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], false);
+
+        let error = api
+            .audit_find(
+                &event,
+                AuditFindRequest {
+                    filters: AuditLogFilter::default(),
+                    limit: 10,
+                },
+            )
+            .expect_err("audit.find without filters must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(error.detail, HostApiErrorDetail::MissingAuditFilter);
+    }
+
+    #[test]
+    fn audit_compensate_appends_compensation_entry() {
+        let event = manual_event();
+        let (_dir, api) =
+            storage_api_with_registry(&["audit.compensate", "audit.read"], &[], false);
+        seed_audit_entries(&api);
+
+        let response = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "act_1".to_owned(),
+                },
+            )
+            .expect("audit.compensate succeeds");
+
+        assert!(response.value.compensated);
+        let new_action_id = response
+            .value
+            .new_action_id
+            .clone()
+            .expect("new action id returned");
+        let inserted = api
+            .storage(HostApiOperation::AuditCompensate)
+            .expect("storage")
+            .get_audit_entry(&new_action_id)
+            .expect("lookup succeeds")
+            .expect("compensation entry exists");
+        assert_eq!(inserted.op, "audit.compensate");
+        assert_eq!(inserted.target_id.as_deref(), Some("act_1"));
+    }
+
+    #[test]
+    fn audit_compensate_dry_run_does_not_append_entry() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.compensate", "audit.read"], &[], true);
+        seed_audit_entries(&api);
+
+        let response = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "act_1".to_owned(),
+                },
+            )
+            .expect("dry-run compensate succeeds");
+
+        assert!(response.dry_run);
+        let new_action_id = response
+            .value
+            .new_action_id
+            .clone()
+            .expect("predicted action id returned");
+        assert!(
+            api.storage(HostApiOperation::AuditCompensate)
+                .expect("storage")
+                .get_audit_entry(&new_action_id)
+                .expect("lookup succeeds")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn capability_denial_uses_structured_error_surface() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&[], &["audit.compensate"], false);
+        seed_audit_entries(&api);
+
+        let error = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "act_1".to_owned(),
+                },
+            )
+            .expect_err("denied capability must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Denied);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::CapabilityDenied {
+                capability: "audit.compensate".to_owned(),
+                unit_id: "moderation.test".to_owned(),
+            }
         );
     }
 
