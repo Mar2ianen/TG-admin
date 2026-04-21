@@ -36,7 +36,7 @@ impl Application {
         }
     }
 
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         self.startup().await?;
         let reason = self.shutdown.wait().await?;
         self.graceful_shutdown(reason).await?;
@@ -197,10 +197,10 @@ impl RuntimeServices {
     fn from_config(config: &AppConfig) -> Self {
         Self {
             storage: Storage::new(config.paths.database_path.clone()),
-            audit: AuditService::new(config.observability.metrics_enabled),
+            audit: AuditService::new(true),
             scheduler: Scheduler::new(config.scheduler.tick_interval_ms),
             telegram: TelegramGateway::new(config.telegram.polling),
-            host_api: HostApi::new(config.runtime.manual_mode_enabled),
+            host_api: HostApi::new(false),
         }
     }
 }
@@ -216,19 +216,27 @@ struct RuntimeSummary<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Application, LifecycleState};
+    use super::{Application, LifecycleState, RuntimeState};
     use crate::config::AppConfig;
-    use crate::shutdown::ShutdownController;
+    use crate::shutdown::{ShutdownController, ShutdownReason};
 
     #[tokio::test]
-    async fn application_run_transitions_to_stopped() {
-        let app = Application::from_config_with_shutdown(
+    async fn startup_and_shutdown_transition_application_to_stopped() {
+        let mut app = Application::from_config_with_shutdown(
             AppConfig::default(),
             ShutdownController::immediate(),
         );
         assert_eq!(app.state.lifecycle, LifecycleState::Created);
 
-        app.run().await.expect("application run succeeds");
+        app.startup().await.expect("startup succeeds");
+        assert_eq!(app.state.lifecycle, LifecycleState::Running);
+
+        app.graceful_shutdown(ShutdownReason::Immediate)
+            .await
+            .expect("shutdown succeeds");
+        assert_eq!(app.state.lifecycle, LifecycleState::Stopped);
+        assert!(app.state.started_at.is_some());
+        assert!(app.state.stopped_at.is_some());
     }
 
     #[test]
@@ -240,13 +248,39 @@ mod tests {
         assert!(summary.polling);
     }
 
+    #[test]
+    fn audit_service_is_independent_from_metrics_flag() {
+        let mut config = AppConfig::default();
+        config.observability.metrics_enabled = false;
+
+        let runtime = RuntimeState::from_config(&config);
+        let summary = runtime.summary();
+
+        assert!(summary.audit_enabled);
+    }
+
+    #[test]
+    fn manual_mode_does_not_enable_dry_run() {
+        let mut config = AppConfig::default();
+        config.runtime.manual_mode_enabled = true;
+
+        let runtime = RuntimeState::from_config(&config);
+        let summary = runtime.summary();
+
+        assert!(!summary.host_api_dry_run);
+    }
+
     #[tokio::test]
-    async fn immediate_shutdown_marks_application_stopped() {
-        let app = Application::from_config_with_shutdown(
+    async fn application_run_with_immediate_shutdown_reaches_stopped_state() {
+        let mut app = Application::from_config_with_shutdown(
             AppConfig::default(),
             ShutdownController::immediate(),
         );
 
         app.run().await.expect("application run succeeds");
+
+        assert_eq!(app.state.lifecycle, LifecycleState::Stopped);
+        assert!(app.state.started_at.is_some());
+        assert!(app.state.stopped_at.is_some());
     }
 }

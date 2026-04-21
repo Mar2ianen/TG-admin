@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AppConfig {
     pub telegram: TelegramConfig,
     pub paths: PathsConfig,
@@ -40,6 +41,7 @@ impl AppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TelegramConfig {
     pub bot_token: Option<String>,
     pub polling: bool,
@@ -61,6 +63,7 @@ impl Default for TelegramConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PathsConfig {
     pub data_dir: PathBuf,
     pub database_path: PathBuf,
@@ -85,6 +88,7 @@ impl Default for PathsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     pub sqlite_journal_mode: String,
     pub sqlite_synchronous: String,
@@ -106,6 +110,7 @@ impl Default for StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeConfig {
     pub tokio_worker_threads: Option<usize>,
     pub shutdown_grace_period_ms: u64,
@@ -127,6 +132,7 @@ impl Default for RuntimeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsConfig {
     pub max_message_text_bytes: usize,
     pub max_caption_bytes: usize,
@@ -156,6 +162,7 @@ impl Default for LimitsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FetchPolicyConfig {
     pub enabled: bool,
     pub deny_private_ip_ranges: bool,
@@ -189,6 +196,7 @@ impl Default for FetchPolicyConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SchedulerConfig {
     pub tick_interval_ms: u64,
     pub max_concurrent_jobs: usize,
@@ -210,6 +218,7 @@ impl Default for SchedulerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ObservabilityConfig {
     pub log_level: String,
     pub json_logs: bool,
@@ -229,6 +238,7 @@ impl Default for ObservabilityConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FeatureFlags {
     pub hot_reload: bool,
     pub semantic: bool,
@@ -352,6 +362,32 @@ bloom_prefilter = false
         assert_eq!(config.runtime.tokio_worker_threads, Some(2));
         assert_eq!(config.observability.log_level, "debug");
         assert!(!config.features.hot_reload);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn partial_config_file_uses_section_defaults() {
+        let base = std::env::temp_dir().join(format!(
+            "telegram-moderation-os-partial-config-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&base).expect("temp config dir");
+        let path = base.join("config.toml");
+        let body = r#"
+[observability]
+log_level = "warn"
+"#;
+
+        fs::write(&path, body).expect("config file");
+        let config = AppConfig::load_from_path(&path).expect("parsed config");
+
+        assert_eq!(config.observability.log_level, "warn");
+        assert!(config.telegram.polling);
+        assert_eq!(config.storage.sqlite_journal_mode, "WAL");
+        assert!(config.observability.json_logs);
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&base);

@@ -22,5 +22,6 @@ async fn main() -> Result<()> {
     init_logging(&config)?;
     info!("bootstrapping application");
 
-    Application::from_config(config).run().await
+    let mut application = Application::from_config(config);
+    application.run().await
 }
