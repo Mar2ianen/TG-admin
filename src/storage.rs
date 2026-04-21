@@ -6,6 +6,107 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use thiserror::Error;
 
 const CURRENT_SCHEMA_VERSION: u32 = 1;
+const MIGRATION_V1_SQL: &str = "
+CREATE TABLE IF NOT EXISTS schema_bootstrap (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO schema_bootstrap (key, value)
+VALUES ('storage_bootstrap', 'initialized');
+
+CREATE TABLE IF NOT EXISTS users (
+  user_id INTEGER PRIMARY KEY,
+  username TEXT,
+  display_name TEXT,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  warn_count INTEGER NOT NULL DEFAULT 0,
+  shadowbanned INTEGER NOT NULL DEFAULT 0,
+  reputation INTEGER NOT NULL DEFAULT 0,
+  state_json TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kv_store (
+  scope_kind TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope_kind, scope_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS message_journal (
+  chat_id INTEGER NOT NULL,
+  message_id INTEGER NOT NULL,
+  user_id INTEGER,
+  date_utc TEXT NOT NULL,
+  update_type TEXT NOT NULL,
+  text TEXT,
+  normalized_text TEXT,
+  has_media INTEGER NOT NULL DEFAULT 0,
+  reply_to_message_id INTEGER,
+  file_ids_json TEXT,
+  meta_json TEXT,
+  PRIMARY KEY (chat_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_msg_chat_date
+ON message_journal(chat_id, date_utc);
+
+CREATE INDEX IF NOT EXISTS idx_msg_chat_user_date
+ON message_journal(chat_id, user_id, date_utc);
+
+CREATE INDEX IF NOT EXISTS idx_msg_chat_reply
+ON message_journal(chat_id, reply_to_message_id);
+
+CREATE TABLE IF NOT EXISTS jobs (
+  job_id TEXT PRIMARY KEY,
+  executor_unit TEXT NOT NULL,
+  run_at TEXT NOT NULL,
+  scheduled_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  dedupe_key TEXT,
+  payload_json TEXT NOT NULL,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  max_retries INTEGER NOT NULL DEFAULT 0,
+  last_error_code TEXT,
+  last_error_text TEXT,
+  audit_action_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  action_id TEXT PRIMARY KEY,
+  trace_id TEXT,
+  request_id TEXT,
+  unit_name TEXT NOT NULL,
+  execution_mode TEXT NOT NULL,
+  op TEXT NOT NULL,
+  actor_user_id INTEGER,
+  chat_id INTEGER,
+  target_kind TEXT,
+  target_id TEXT,
+  trigger_message_id INTEGER,
+  idempotency_key TEXT,
+  reversible INTEGER NOT NULL DEFAULT 0,
+  compensation_json TEXT,
+  args_json TEXT NOT NULL,
+  result_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS processed_updates (
+  update_id INTEGER PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  processed_at TEXT NOT NULL,
+  execution_mode TEXT NOT NULL
+);
+
+PRAGMA user_version = 1;
+";
 
 #[derive(Debug, Clone)]
 pub struct Storage {
@@ -246,17 +347,7 @@ impl StorageConnection {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        tx.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS schema_bootstrap (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO schema_bootstrap (key, value)
-            VALUES ('storage_bootstrap', 'initialized');
-            PRAGMA user_version = 1;
-            ",
-        )?;
+        tx.execute_batch(MIGRATION_V1_SQL)?;
         tx.commit()?;
 
         Ok(())
@@ -311,8 +402,11 @@ fn read_user_version(connection: &Connection) -> rusqlite::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CURRENT_SCHEMA_VERSION, JournalMode, Storage, StorageConfig, SynchronousMode, TempStoreMode,
+        JournalMode, Storage, StorageConfig, SynchronousMode, TempStoreMode, CURRENT_SCHEMA_VERSION,
     };
+    use std::collections::BTreeSet;
+
+    use rusqlite::params;
     use tempfile::tempdir;
 
     #[test]
@@ -385,6 +479,20 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("failed to query schema_bootstrap: {error}"));
         assert_eq!(row_count, 1);
+
+        let tables = sqlite_objects(bootstrap.connection().connection(), "table");
+        assert!(tables.contains("schema_bootstrap"));
+        assert!(tables.contains("users"));
+        assert!(tables.contains("kv_store"));
+        assert!(tables.contains("message_journal"));
+        assert!(tables.contains("jobs"));
+        assert!(tables.contains("audit_log"));
+        assert!(tables.contains("processed_updates"));
+
+        let indexes = sqlite_objects(bootstrap.connection().connection(), "index");
+        assert!(indexes.contains("idx_msg_chat_date"));
+        assert!(indexes.contains("idx_msg_chat_user_date"));
+        assert!(indexes.contains("idx_msg_chat_reply"));
     }
 
     #[test]
@@ -406,6 +514,17 @@ mod tests {
         assert_eq!(second.migration().current_version, CURRENT_SCHEMA_VERSION);
         assert!(second.migration().applied_versions.is_empty());
         assert!(!second.migration().changed());
+
+        let journal_indexes =
+            index_names_for_table(second.connection().connection(), "message_journal");
+        assert_eq!(
+            journal_indexes,
+            BTreeSet::from([
+                String::from("idx_msg_chat_date"),
+                String::from("idx_msg_chat_reply"),
+                String::from("idx_msg_chat_user_date"),
+            ])
+        );
     }
 
     #[test]
@@ -431,5 +550,150 @@ mod tests {
                 supported: CURRENT_SCHEMA_VERSION
             }
         ));
+    }
+
+    #[test]
+    fn bootstrap_preserves_required_table_shapes() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("failed to create tempdir: {error}"));
+        let database_path = dir.path().join("runtime.sqlite3");
+        let storage = Storage::new(database_path);
+
+        let bootstrap = storage
+            .bootstrap()
+            .unwrap_or_else(|error| panic!("failed to bootstrap storage: {error}"));
+        let connection = bootstrap.connection().connection();
+
+        assert_eq!(
+            table_column_names(connection, "users"),
+            vec![
+                "user_id",
+                "username",
+                "display_name",
+                "first_seen_at",
+                "last_seen_at",
+                "warn_count",
+                "shadowbanned",
+                "reputation",
+                "state_json",
+                "updated_at",
+            ]
+        );
+        assert_eq!(
+            table_column_names(connection, "kv_store"),
+            vec!["scope_kind", "scope_id", "key", "value_json", "updated_at"]
+        );
+        assert_eq!(
+            table_column_names(connection, "message_journal"),
+            vec![
+                "chat_id",
+                "message_id",
+                "user_id",
+                "date_utc",
+                "update_type",
+                "text",
+                "normalized_text",
+                "has_media",
+                "reply_to_message_id",
+                "file_ids_json",
+                "meta_json",
+            ]
+        );
+        assert_eq!(
+            table_column_names(connection, "jobs"),
+            vec![
+                "job_id",
+                "executor_unit",
+                "run_at",
+                "scheduled_at",
+                "status",
+                "dedupe_key",
+                "payload_json",
+                "retry_count",
+                "max_retries",
+                "last_error_code",
+                "last_error_text",
+                "audit_action_id",
+                "created_at",
+                "updated_at",
+            ]
+        );
+        assert_eq!(
+            table_column_names(connection, "audit_log"),
+            vec![
+                "action_id",
+                "trace_id",
+                "request_id",
+                "unit_name",
+                "execution_mode",
+                "op",
+                "actor_user_id",
+                "chat_id",
+                "target_kind",
+                "target_id",
+                "trigger_message_id",
+                "idempotency_key",
+                "reversible",
+                "compensation_json",
+                "args_json",
+                "result_json",
+                "created_at",
+            ]
+        );
+        assert_eq!(
+            table_column_names(connection, "processed_updates"),
+            vec!["update_id", "event_id", "processed_at", "execution_mode"]
+        );
+    }
+
+    fn sqlite_objects(connection: &rusqlite::Connection, object_type: &str) -> BTreeSet<String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT name
+                 FROM sqlite_master
+                 WHERE type = ?1 AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .unwrap_or_else(|error| panic!("failed to prepare sqlite_master query: {error}"));
+
+        statement
+            .query_map(params![object_type], |row| row.get::<_, String>(0))
+            .unwrap_or_else(|error| panic!("failed to query sqlite_master: {error}"))
+            .collect::<Result<BTreeSet<_>, _>>()
+            .unwrap_or_else(|error| panic!("failed to collect sqlite objects: {error}"))
+    }
+
+    fn index_names_for_table(
+        connection: &rusqlite::Connection,
+        table_name: &str,
+    ) -> BTreeSet<String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT name
+                 FROM sqlite_master
+                 WHERE type = 'index'
+                   AND tbl_name = ?1
+                   AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name",
+            )
+            .unwrap_or_else(|error| panic!("failed to prepare index query: {error}"));
+
+        statement
+            .query_map(params![table_name], |row| row.get::<_, String>(0))
+            .unwrap_or_else(|error| panic!("failed to query indexes: {error}"))
+            .collect::<Result<BTreeSet<_>, _>>()
+            .unwrap_or_else(|error| panic!("failed to collect indexes: {error}"))
+    }
+
+    fn table_column_names(connection: &rusqlite::Connection, table_name: &str) -> Vec<String> {
+        let pragma = format!("PRAGMA table_info({table_name})");
+        let mut statement = connection
+            .prepare(&pragma)
+            .unwrap_or_else(|error| panic!("failed to prepare table_info pragma: {error}"));
+
+        statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap_or_else(|error| panic!("failed to query table_info: {error}"))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|error| panic!("failed to collect column names: {error}"))
     }
 }
