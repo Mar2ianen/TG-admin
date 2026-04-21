@@ -1,8 +1,14 @@
-#[derive(Debug, Clone, Default)]
-pub struct TelegramGateway;
+#[derive(Debug, Clone)]
+pub struct TelegramGateway {
+    polling: bool,
+}
 
 impl TelegramGateway {
-    pub fn new() -> Self {
-        Self
+    pub fn new(polling: bool) -> Self {
+        Self { polling }
+    }
+
+    pub fn polling(&self) -> bool {
+        self.polling
     }
 }

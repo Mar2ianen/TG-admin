@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -118,21 +120,10 @@ pub struct JobContext {
     pub run_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemContext {
     pub locale: Option<String>,
     pub unit: Option<String>,
     pub trace_id: Option<String>,
     pub build: Option<String>,
-}
-
-impl Default for SystemContext {
-    fn default() -> Self {
-        Self {
-            locale: None,
-            unit: None,
-            trace_id: None,
-            build: None,
-        }
-    }
 }

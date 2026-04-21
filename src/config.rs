@@ -1,7 +1,10 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub telegram: TelegramConfig,
     pub paths: PathsConfig,
@@ -14,19 +17,25 @@ pub struct AppConfig {
     pub features: FeatureFlags,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            telegram: TelegramConfig::default(),
-            paths: PathsConfig::default(),
-            storage: StorageConfig::default(),
-            runtime: RuntimeConfig::default(),
-            limits: LimitsConfig::default(),
-            fetch_policy: FetchPolicyConfig::default(),
-            scheduler: SchedulerConfig::default(),
-            observability: ObservabilityConfig::default(),
-            features: FeatureFlags::default(),
+impl AppConfig {
+    pub fn load() -> Result<Self> {
+        let path = env::var_os("TMO_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("config.toml"));
+
+        Self::load_from_path(&path)
+    }
+
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
         }
+
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config from {}", path.display()))?;
+
+        toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config from {}", path.display()))
     }
 }
 
@@ -233,5 +242,118 @@ impl Default for FeatureFlags {
             semantic: true,
             bloom_prefilter: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+    use std::fs;
+
+    #[test]
+    fn missing_config_path_uses_defaults() {
+        let base = std::env::temp_dir().join(format!(
+            "telegram-moderation-os-missing-{}",
+            std::process::id()
+        ));
+        let path = base.join("config.toml");
+        let config = AppConfig::load_from_path(&path).expect("default config");
+
+        assert!(config.telegram.polling);
+        assert_eq!(config.storage.sqlite_journal_mode, "WAL");
+    }
+
+    #[test]
+    fn config_file_overrides_defaults() {
+        let base = std::env::temp_dir().join(format!(
+            "telegram-moderation-os-config-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&base).expect("temp config dir");
+        let path = base.join("config.toml");
+        let body = r#"
+[telegram]
+bot_token = "token"
+polling = false
+admin_user_ids = [1, 2]
+primary_chat_ids = [-100]
+allowed_webhook_hosts = ["example.com"]
+
+[paths]
+data_dir = "state"
+database_path = "state/runtime.sqlite3"
+units_dir = "units"
+scripts_dir = "scripts"
+templates_dir = "templates"
+log_dir = "logs"
+
+[storage]
+sqlite_journal_mode = "WAL"
+sqlite_synchronous = "NORMAL"
+sqlite_busy_timeout_ms = 1000
+max_write_batch_size = 10
+write_flush_interval_ms = 250
+
+[runtime]
+tokio_worker_threads = 2
+shutdown_grace_period_ms = 500
+reload_enabled = false
+manual_mode_enabled = true
+degraded_mode_enabled = false
+
+[limits]
+max_message_text_bytes = 100
+max_caption_bytes = 101
+max_callback_data_bytes = 102
+max_username_bytes = 103
+max_units_per_event = 3
+max_pipeline_depth = 4
+max_batch_ops = 5
+max_queue_depth_ingest = 6
+max_queue_depth_dispatch = 7
+
+[fetch_policy]
+enabled = false
+deny_private_ip_ranges = true
+deny_localhost = true
+max_concurrent_fetches = 8
+connect_timeout_ms = 9
+request_timeout_ms = 10
+max_response_body_bytes = 11
+max_decompressed_body_bytes = 12
+max_redirects = 13
+allowed_domains = ["allowed.example"]
+blocked_domains = ["blocked.example"]
+
+[scheduler]
+tick_interval_ms = 14
+max_concurrent_jobs = 15
+max_scheduler_lag_ms = 16
+retry_backoff_base_ms = 17
+retry_backoff_max_ms = 18
+
+[observability]
+log_level = "debug"
+json_logs = false
+metrics_enabled = false
+trace_sampling = "off"
+
+[features]
+hot_reload = false
+semantic = false
+bloom_prefilter = false
+"#;
+
+        fs::write(&path, body).expect("config file");
+        let config = AppConfig::load_from_path(&path).expect("parsed config");
+
+        assert_eq!(config.telegram.bot_token.as_deref(), Some("token"));
+        assert_eq!(config.runtime.tokio_worker_threads, Some(2));
+        assert_eq!(config.observability.log_level, "debug");
+        assert!(!config.features.hot_reload);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&base);
     }
 }
