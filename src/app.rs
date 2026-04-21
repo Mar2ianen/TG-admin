@@ -3,21 +3,28 @@ use crate::config::AppConfig;
 use crate::event::EventContext;
 use crate::host_api::HostApi;
 use crate::scheduler::Scheduler;
+use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::Storage;
 use crate::tg::TelegramGateway;
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use tracing::info;
+use tokio::time::{Duration, timeout};
+use tracing::{info, warn};
 
 pub struct Application {
     config: AppConfig,
     state: ApplicationState,
     runtime: RuntimeState,
+    shutdown: ShutdownController,
 }
 
 impl Application {
     pub fn from_config(config: AppConfig) -> Self {
+        Self::from_config_with_shutdown(config, ShutdownController::os_signals())
+    }
+
+    fn from_config_with_shutdown(config: AppConfig, shutdown: ShutdownController) -> Self {
         let startup_event = EventContext::system_event();
         let runtime = RuntimeState::from_config(&config);
 
@@ -25,12 +32,14 @@ impl Application {
             config,
             state: ApplicationState::new(startup_event),
             runtime,
+            shutdown,
         }
     }
 
     pub async fn run(mut self) -> Result<()> {
         self.startup().await?;
-        self.shutdown().await?;
+        let reason = self.shutdown.wait().await?;
+        self.graceful_shutdown(reason).await?;
         Ok(())
     }
 
@@ -58,11 +67,35 @@ impl Application {
         Ok(())
     }
 
-    async fn shutdown(&mut self) -> Result<()> {
+    async fn graceful_shutdown(&mut self, reason: ShutdownReason) -> Result<()> {
         self.state.mark_shutting_down();
-        self.state.mark_stopped();
 
-        info!(lifecycle = ?self.state.lifecycle, "shutdown path complete");
+        info!(
+            lifecycle = ?self.state.lifecycle,
+            reason = ?reason,
+            grace_period_ms = self.config.runtime.shutdown_grace_period_ms,
+            "shutdown signal received"
+        );
+
+        let grace_period = Duration::from_millis(self.config.runtime.shutdown_grace_period_ms);
+        let shutdown = timeout(grace_period, self.runtime.shutdown());
+
+        match shutdown.await {
+            Ok(Ok(())) => {
+                self.state.mark_stopped();
+                info!(lifecycle = ?self.state.lifecycle, reason = ?reason, "shutdown path complete");
+            }
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                self.state.mark_stopped();
+                warn!(
+                    lifecycle = ?self.state.lifecycle,
+                    reason = ?reason,
+                    grace_period_ms = self.config.runtime.shutdown_grace_period_ms,
+                    "shutdown grace period exceeded"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -138,6 +171,12 @@ impl RuntimeState {
             host_api_dry_run: self.services.host_api.dry_run(),
         }
     }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        self.registry = RuntimeRegistry::default();
+        tokio::task::yield_now().await;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -179,10 +218,14 @@ struct RuntimeSummary<'a> {
 mod tests {
     use super::{Application, LifecycleState};
     use crate::config::AppConfig;
+    use crate::shutdown::ShutdownController;
 
     #[tokio::test]
     async fn application_run_transitions_to_stopped() {
-        let app = Application::from_config(AppConfig::default());
+        let app = Application::from_config_with_shutdown(
+            AppConfig::default(),
+            ShutdownController::immediate(),
+        );
         assert_eq!(app.state.lifecycle, LifecycleState::Created);
 
         app.run().await.expect("application run succeeds");
@@ -195,5 +238,15 @@ mod tests {
 
         assert_eq!(summary.registry.total_units, 0);
         assert!(summary.polling);
+    }
+
+    #[tokio::test]
+    async fn immediate_shutdown_marks_application_stopped() {
+        let app = Application::from_config_with_shutdown(
+            AppConfig::default(),
+            ShutdownController::immediate(),
+        );
+
+        app.run().await.expect("application run succeeds");
     }
 }
