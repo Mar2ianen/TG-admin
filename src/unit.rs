@@ -1210,8 +1210,8 @@ MaxRetries = 3
 OnFailure = "moderation.alert.unit"
 
 [Capabilities]
-Allow = ["telegram.delete_message", "telegram.restrict_member", "audit.write"]
-Deny = ["http.external"]
+Allow = ["tg.moderate.delete", "tg.moderate.restrict", "audit.compensate"]
+Deny = ["sys.http.fetch"]
 
 [Runtime]
 MaxMemoryKb = 65536
@@ -1262,11 +1262,11 @@ AllowManualInvoke = true
             manifest.capabilities,
             CapabilitiesSpec {
                 allow: vec![
-                    "telegram.delete_message".into(),
-                    "telegram.restrict_member".into(),
-                    "audit.write".into(),
+                    "tg.moderate.delete".into(),
+                    "tg.moderate.restrict".into(),
+                    "audit.compensate".into(),
                 ],
-                deny: vec!["http.external".into()],
+                deny: vec!["sys.http.fetch".into()],
             }
         );
         assert_eq!(
@@ -1298,7 +1298,7 @@ Pattern = "(?i)free\\s+nitro"
 ExecStart = "scripts/moderation/spam.rhai"
 
 [Capabilities]
-Allow = ["telegram.delete_message"]
+Allow = ["tg.moderate.delete"]
 
 [Runtime]
 AllowManualInvoke = true
@@ -1320,7 +1320,7 @@ AllowManualInvoke = true
         assert_eq!(
             manifest.capabilities,
             CapabilitiesSpec {
-                allow: vec!["telegram.delete_message".into()],
+                allow: vec!["tg.moderate.delete".into()],
                 deny: Vec::new(),
             }
         );
