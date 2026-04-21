@@ -313,6 +313,71 @@ impl UnitRegistry {
         Self { entries }
     }
 
+    pub fn load_manifests(manifests: Vec<UnitManifest>) -> UnitRegistryLoadReport {
+        build_registry_from_manifests(manifests)
+    }
+
+    pub fn load_paths(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> UnitRegistryLoadReport {
+        let mut parsed_manifests = Vec::new();
+        let mut entries = Vec::new();
+
+        for path in paths {
+            let path = path.as_ref();
+            match UnitManifest::from_path(path) {
+                Ok(manifest) => parsed_manifests.push(manifest),
+                Err(error) => entries.push(UnitDescriptor::failed_without_manifest(
+                    path.display().to_string(),
+                    vec![UnitDiagnostic::Load(UnitLoadDiagnostic::from_load_error(
+                        &error,
+                    ))],
+                )),
+            }
+        }
+
+        let mut report = build_registry_from_manifests(parsed_manifests);
+        entries.append(&mut report.registry.entries);
+        report.registry = UnitRegistry::from_entries(entries);
+        report
+    }
+
+    pub fn apply_reload_manifests(
+        &mut self,
+        manifests: Vec<UnitManifest>,
+    ) -> UnitRegistryApplyOutcome {
+        let candidate = Self::load_manifests(manifests);
+        if candidate.is_fully_valid() {
+            *self = candidate.registry.clone();
+            UnitRegistryApplyOutcome {
+                applied: true,
+                candidate,
+            }
+        } else {
+            UnitRegistryApplyOutcome {
+                applied: false,
+                candidate,
+            }
+        }
+    }
+
+    pub fn apply_reload_paths(
+        &mut self,
+        paths: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> UnitRegistryApplyOutcome {
+        let candidate = Self::load_paths(paths);
+        if candidate.is_fully_valid() {
+            *self = candidate.registry.clone();
+            UnitRegistryApplyOutcome {
+                applied: true,
+                candidate,
+            }
+        } else {
+            UnitRegistryApplyOutcome {
+                applied: false,
+                candidate,
+            }
+        }
+    }
+
     pub fn status_summary(&self) -> UnitRegistryStatus {
         let mut summary = UnitRegistryStatus {
             total_units: self.entries.len(),
@@ -341,21 +406,53 @@ impl UnitRegistry {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    pub fn entries(&self) -> &[UnitDescriptor] {
+        &self.entries
+    }
+
+    pub fn get(&self, id: &str) -> Option<&UnitDescriptor> {
+        self.entries.iter().find(|entry| entry.id == id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitDescriptor {
     pub id: String,
-    pub manifest: UnitManifest,
+    pub manifest: Option<UnitManifest>,
     pub status: UnitStatus,
+    pub diagnostics: Vec<UnitDiagnostic>,
 }
 
 impl UnitDescriptor {
     pub fn new(manifest: UnitManifest, status: UnitStatus) -> Self {
         Self {
             id: manifest.name().to_owned(),
-            manifest,
+            manifest: Some(manifest),
             status,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn from_manifest(
+        manifest: UnitManifest,
+        status: UnitStatus,
+        diagnostics: Vec<UnitDiagnostic>,
+    ) -> Self {
+        Self {
+            id: manifest.name().to_owned(),
+            manifest: Some(manifest),
+            status,
+            diagnostics,
+        }
+    }
+
+    fn failed_without_manifest(id: String, diagnostics: Vec<UnitDiagnostic>) -> Self {
+        Self {
+            id,
+            manifest: None,
+            status: UnitStatus::Failed,
+            diagnostics,
         }
     }
 }
@@ -381,6 +478,62 @@ pub struct UnitRegistryStatus {
     pub failed_units: usize,
     pub dead_units: usize,
     pub disabled_units: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnitRegistryLoadReport {
+    pub registry: UnitRegistry,
+}
+
+impl UnitRegistryLoadReport {
+    pub fn is_fully_valid(&self) -> bool {
+        self.registry
+            .entries
+            .iter()
+            .all(|entry| entry.status != UnitStatus::Failed)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UnitRegistryApplyOutcome {
+    pub applied: bool,
+    pub candidate: UnitRegistryLoadReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnitDiagnostic {
+    Load(UnitLoadDiagnostic),
+    Validation(UnitValidationError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnitLoadDiagnostic {
+    ReadFile {
+        path: PathBuf,
+        message: String,
+    },
+    ParseToml {
+        source_name: String,
+        message: String,
+    },
+}
+
+impl UnitLoadDiagnostic {
+    fn from_load_error(error: &UnitManifestLoadError) -> Self {
+        match error {
+            UnitManifestLoadError::ReadFile { path, source } => Self::ReadFile {
+                path: path.clone(),
+                message: source.to_string(),
+            },
+            UnitManifestLoadError::ParseToml {
+                source_name,
+                source,
+            } => Self::ParseToml {
+                source_name: source_name.clone(),
+                message: source.to_string(),
+            },
+        }
+    }
 }
 
 const fn default_enabled() -> bool {
@@ -810,6 +963,87 @@ fn format_issues(issues: &[UnitValidationError]) -> String {
         .join("; ")
 }
 
+fn build_registry_from_manifests(manifests: Vec<UnitManifest>) -> UnitRegistryLoadReport {
+    let diagnostics = collect_manifest_diagnostics(&manifests);
+    let entries = manifests
+        .into_iter()
+        .map(|manifest| {
+            let entry_diagnostics = diagnostics
+                .get(manifest.name())
+                .cloned()
+                .unwrap_or_default();
+            let status = status_for_manifest(&manifest, &entry_diagnostics);
+            UnitDescriptor::from_manifest(manifest, status, entry_diagnostics)
+        })
+        .collect();
+
+    UnitRegistryLoadReport {
+        registry: UnitRegistry::from_entries(entries),
+    }
+}
+
+fn collect_manifest_diagnostics(
+    manifests: &[UnitManifest],
+) -> HashMap<String, Vec<UnitDiagnostic>> {
+    let mut diagnostics = HashMap::<String, Vec<UnitDiagnostic>>::new();
+
+    if let Err(errors) = UnitManifest::validate_set(manifests) {
+        for issue in errors.into_issues() {
+            attach_validation_issue(&mut diagnostics, issue);
+        }
+    }
+
+    diagnostics
+}
+
+fn attach_validation_issue(
+    diagnostics: &mut HashMap<String, Vec<UnitDiagnostic>>,
+    issue: UnitValidationError,
+) {
+    match &issue {
+        UnitValidationError::DependencyCycle { cycle } => {
+            let mut units = BTreeSet::new();
+            for unit in cycle.iter().take(cycle.len().saturating_sub(1)) {
+                units.insert(unit.clone());
+            }
+
+            for unit in units {
+                diagnostics
+                    .entry(unit)
+                    .or_default()
+                    .push(UnitDiagnostic::Validation(issue.clone()));
+            }
+        }
+        UnitValidationError::MissingExecStart { unit }
+        | UnitValidationError::InvalidTriggerShape { unit, .. }
+        | UnitValidationError::InvalidTimeoutShape { unit, .. }
+        | UnitValidationError::InvalidRetryPolicy { unit, .. }
+        | UnitValidationError::UnknownCapability { unit, .. }
+        | UnitValidationError::DuplicateUnitName { unit }
+        | UnitValidationError::MissingDependency { unit, .. } => {
+            diagnostics
+                .entry(unit.clone())
+                .or_default()
+                .push(UnitDiagnostic::Validation(issue));
+        }
+    }
+}
+
+fn status_for_manifest(manifest: &UnitManifest, diagnostics: &[UnitDiagnostic]) -> UnitStatus {
+    if diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            UnitDiagnostic::Load(_) | UnitDiagnostic::Validation(_)
+        )
+    }) {
+        UnitStatus::Failed
+    } else if manifest.unit.enabled {
+        UnitStatus::Active
+    } else {
+        UnitStatus::Disabled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,64 +1416,50 @@ TimeoutSec = 3
             .validate()
             .expect_err("invalid manifest should not validate");
 
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::MissingExecStart {
-                    unit: "moderation.invalid.unit".into(),
-                })
-        );
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::InvalidTriggerShape {
-                    unit: "moderation.invalid.unit".into(),
-                    trigger_type: TriggerType::Command,
-                    detail: TriggerValidationDetail::BlankCommandName,
-                })
-        );
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::InvalidTimeoutShape {
-                    unit: "moderation.invalid.unit".into(),
-                    detail: TimeoutValidationDetail::NonPositiveTimeout,
-                })
-        );
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::InvalidRetryPolicy {
-                    unit: "moderation.invalid.unit".into(),
-                    detail: RetryValidationDetail::RetryCountRequiresRestart,
-                })
-        );
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::InvalidRetryPolicy {
-                    unit: "moderation.invalid.unit".into(),
-                    detail: RetryValidationDetail::RestartDelayRequiresRetries,
-                })
-        );
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::UnknownCapability {
-                    unit: "moderation.invalid.unit".into(),
-                    capability: "telegram.delete_message".into(),
-                    location: CapabilityListKind::Allow,
-                })
-        );
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::UnknownCapability {
-                    unit: "moderation.invalid.unit".into(),
-                    capability: "sys.shell.exec".into(),
-                    location: CapabilityListKind::Deny,
-                })
-        );
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::MissingExecStart {
+                unit: "moderation.invalid.unit".into(),
+            }));
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::InvalidTriggerShape {
+                unit: "moderation.invalid.unit".into(),
+                trigger_type: TriggerType::Command,
+                detail: TriggerValidationDetail::BlankCommandName,
+            }));
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::InvalidTimeoutShape {
+                unit: "moderation.invalid.unit".into(),
+                detail: TimeoutValidationDetail::NonPositiveTimeout,
+            }));
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::InvalidRetryPolicy {
+                unit: "moderation.invalid.unit".into(),
+                detail: RetryValidationDetail::RetryCountRequiresRestart,
+            }));
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::InvalidRetryPolicy {
+                unit: "moderation.invalid.unit".into(),
+                detail: RetryValidationDetail::RestartDelayRequiresRetries,
+            }));
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::UnknownCapability {
+                unit: "moderation.invalid.unit".into(),
+                capability: "telegram.delete_message".into(),
+                location: CapabilityListKind::Allow,
+            }));
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::UnknownCapability {
+                unit: "moderation.invalid.unit".into(),
+                capability: "sys.shell.exec".into(),
+                location: CapabilityListKind::Deny,
+            }));
     }
 
     #[test]
@@ -1301,22 +1521,18 @@ TimeoutSec = 3
         let error = UnitManifest::validate_set(&[alpha, beta])
             .expect_err("invalid dependency graph should fail validation");
 
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::MissingDependency {
-                    unit: "beta.unit".into(),
-                    dependency: "missing.unit".into(),
-                    relation: UnitDependencyRelation::Wants,
-                })
-        );
-        assert!(
-            error
-                .issues()
-                .contains(&UnitValidationError::DependencyCycle {
-                    cycle: vec!["alpha.unit".into(), "beta.unit".into(), "alpha.unit".into()],
-                })
-        );
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::MissingDependency {
+                unit: "beta.unit".into(),
+                dependency: "missing.unit".into(),
+                relation: UnitDependencyRelation::Wants,
+            }));
+        assert!(error
+            .issues()
+            .contains(&UnitValidationError::DependencyCycle {
+                cycle: vec!["alpha.unit".into(), "beta.unit".into(), "alpha.unit".into()],
+            }));
     }
 
     #[test]
@@ -1352,6 +1568,163 @@ TimeoutSec = 3
         };
 
         UnitManifest::validate_set(&[storage, warn]).expect("valid manifest set should pass");
+    }
+
+    #[test]
+    fn valid_unit_loads_as_active_in_registry() {
+        let report = UnitRegistry::load_manifests(vec![valid_warn_unit()]);
+
+        let entry = report
+            .registry
+            .get("moderation.warn.unit")
+            .expect("valid unit should exist in registry");
+
+        assert!(report.is_fully_valid());
+        assert_eq!(entry.status, UnitStatus::Active);
+        assert!(entry.diagnostics.is_empty());
+        assert!(entry.manifest.is_some());
+    }
+
+    #[test]
+    fn invalid_unit_becomes_failed_without_breaking_other_runtime_entries() {
+        let report = UnitRegistry::load_manifests(vec![valid_warn_unit(), invalid_warn_unit()]);
+
+        assert!(!report.is_fully_valid());
+        assert_eq!(
+            report.registry.status_summary(),
+            UnitRegistryStatus {
+                total_units: 2,
+                active_units: 1,
+                failed_units: 1,
+                ..UnitRegistryStatus::default()
+            }
+        );
+
+        let failed = report
+            .registry
+            .get("moderation.invalid.unit")
+            .expect("invalid unit should remain visible in registry");
+        assert_eq!(failed.status, UnitStatus::Failed);
+        assert!(!failed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn disabled_unit_loads_with_disabled_state() {
+        let mut manifest = valid_warn_unit();
+        manifest.unit.name = "moderation.warn.disabled.unit".into();
+        manifest.unit.enabled = false;
+
+        let report = UnitRegistry::load_manifests(vec![manifest]);
+        let entry = report
+            .registry
+            .get("moderation.warn.disabled.unit")
+            .expect("disabled unit should be present");
+
+        assert!(report.is_fully_valid());
+        assert_eq!(entry.status, UnitStatus::Disabled);
+        assert!(entry.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn reload_keeps_old_registry_when_new_set_fails_validation() {
+        let mut registry = UnitRegistry::load_manifests(vec![valid_warn_unit()]).registry;
+
+        let outcome = registry.apply_reload_manifests(vec![invalid_warn_unit()]);
+
+        assert!(!outcome.applied);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry
+                .get("moderation.warn.unit")
+                .expect("original registry entry should remain")
+                .status,
+            UnitStatus::Active
+        );
+        assert_eq!(
+            outcome.candidate.registry.status_summary(),
+            UnitRegistryStatus {
+                total_units: 1,
+                failed_units: 1,
+                ..UnitRegistryStatus::default()
+            }
+        );
+    }
+
+    #[test]
+    fn path_load_keeps_parse_failures_as_failed_entries() {
+        let valid_path = write_manifest(
+            "warn.unit.toml",
+            r#"
+[Unit]
+Name = "moderation.warn.unit"
+
+[Trigger]
+Type = "command"
+Commands = ["warn"]
+
+[Service]
+ExecStart = "scripts/moderation/warn.rhai"
+"#,
+        );
+        let invalid_path = write_manifest(
+            "broken.unit.toml",
+            r#"
+[Unit]
+Name = "broken.unit"
+
+[Trigger]
+Type = "command"
+Commands = ["warn"
+
+[Service]
+ExecStart = "scripts/moderation/warn.rhai"
+"#,
+        );
+
+        let report = UnitRegistry::load_paths([valid_path.as_path(), invalid_path.as_path()]);
+
+        assert_eq!(
+            report.registry.status_summary(),
+            UnitRegistryStatus {
+                total_units: 2,
+                active_units: 1,
+                failed_units: 1,
+                ..UnitRegistryStatus::default()
+            }
+        );
+        assert!(report.registry.entries().iter().any(|entry| matches!(
+            entry.diagnostics.as_slice(),
+            [UnitDiagnostic::Load(UnitLoadDiagnostic::ParseToml { .. })]
+        )));
+    }
+
+    fn valid_warn_unit() -> UnitManifest {
+        UnitManifest {
+            unit: UnitDefinition::new("moderation.warn.unit"),
+            trigger: TriggerSpec::command(["warn"]),
+            service: ServiceSpec::new("scripts/moderation/warn.rhai"),
+            capabilities: CapabilitiesSpec {
+                allow: vec!["tg.moderate.restrict".into()],
+                deny: Vec::new(),
+            },
+            runtime: RuntimeSpec::default(),
+        }
+    }
+
+    fn invalid_warn_unit() -> UnitManifest {
+        UnitManifest {
+            unit: UnitDefinition::new("moderation.invalid.unit"),
+            trigger: TriggerSpec::command(["warn"]),
+            service: ServiceSpec {
+                exec_start: " ".into(),
+                ..ServiceSpec::new("scripts/moderation/warn.rhai")
+            },
+            capabilities: CapabilitiesSpec {
+                allow: vec!["tg.moderate.restrict".into()],
+                deny: Vec::new(),
+            },
+            runtime: RuntimeSpec::default(),
+        }
     }
 
     fn write_manifest(file_name: &str, contents: &str) -> PathBuf {
