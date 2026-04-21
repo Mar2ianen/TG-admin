@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -20,6 +23,14 @@ pub enum UnitManifestLoadError {
         #[source]
         source: toml::de::Error,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum UnitManifestCheckError {
+    #[error(transparent)]
+    Load(#[from] UnitManifestLoadError),
+    #[error(transparent)]
+    Validation(#[from] UnitValidationErrors),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +75,49 @@ impl UnitManifest {
             })?;
 
         Self::from_toml_source(&contents, path.display().to_string())
+    }
+
+    pub fn load_and_validate_toml_str(input: &str) -> Result<Self, UnitManifestCheckError> {
+        let manifest = Self::from_toml_str(input)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn load_and_validate_path(path: impl AsRef<Path>) -> Result<Self, UnitManifestCheckError> {
+        let manifest = Self::from_path(path)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn validate(&self) -> Result<(), UnitValidationErrors> {
+        let mut issues = Vec::new();
+        let unit_name = self.name().to_owned();
+
+        if self.service.exec_start.trim().is_empty() {
+            issues.push(UnitValidationError::MissingExecStart {
+                unit: unit_name.clone(),
+            });
+        }
+
+        validate_trigger(&unit_name, &self.trigger, &mut issues);
+        validate_service(&unit_name, &self.service, &mut issues);
+        validate_capabilities(&unit_name, &self.capabilities, &mut issues);
+
+        UnitValidationErrors::from_issues(issues)
+    }
+
+    pub fn validate_set(manifests: &[Self]) -> Result<(), UnitValidationErrors> {
+        let mut issues = Vec::new();
+
+        for manifest in manifests {
+            if let Err(errors) = manifest.validate() {
+                issues.extend(errors.into_issues());
+            }
+        }
+
+        validate_dependencies(manifests, &mut issues);
+
+        UnitValidationErrors::from_issues(issues)
     }
 
     fn from_toml_source(
@@ -339,6 +393,421 @@ const fn default_timeout_sec() -> u64 {
 
 const fn default_restart_sec() -> u64 {
     1
+}
+
+static VALID_CAPABILITIES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    HashSet::from([
+        "tg.read_basic",
+        "tg.write_message",
+        "tg.moderate.delete",
+        "tg.moderate.restrict",
+        "tg.moderate.ban",
+        "db.user.read",
+        "db.user.write",
+        "rules.read",
+        "rules.write",
+        "filter.read",
+        "filter.write",
+        "msg.history.read",
+        "job.schedule",
+        "audit.read",
+        "audit.compensate",
+        "ui.session.read",
+        "ui.session.write",
+        "sys.http.fetch",
+        "ml.stt",
+        "ml.embed_text",
+        "unit.control",
+    ])
+});
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct UnitValidationErrors {
+    issues: Vec<UnitValidationError>,
+    message: String,
+}
+
+impl UnitValidationErrors {
+    fn from_issues(issues: Vec<UnitValidationError>) -> Result<(), Self> {
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(Self {
+                message: format_issues(&issues),
+                issues,
+            })
+        }
+    }
+
+    pub fn issues(&self) -> &[UnitValidationError] {
+        &self.issues
+    }
+
+    fn into_issues(self) -> Vec<UnitValidationError> {
+        self.issues
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
+pub enum UnitValidationError {
+    #[error("unit `{unit}` is missing Service.ExecStart")]
+    MissingExecStart { unit: String },
+    #[error("unit `{unit}` has invalid trigger shape for `{trigger_type:?}`: {detail}")]
+    InvalidTriggerShape {
+        unit: String,
+        trigger_type: TriggerType,
+        detail: TriggerValidationDetail,
+    },
+    #[error("unit `{unit}` has invalid timeout shape: {detail}")]
+    InvalidTimeoutShape {
+        unit: String,
+        detail: TimeoutValidationDetail,
+    },
+    #[error("unit `{unit}` has invalid retry policy: {detail}")]
+    InvalidRetryPolicy {
+        unit: String,
+        detail: RetryValidationDetail,
+    },
+    #[error("unit `{unit}` references missing dependency `{dependency}` in `{relation:?}`")]
+    MissingDependency {
+        unit: String,
+        dependency: String,
+        relation: UnitDependencyRelation,
+    },
+    #[error("unit dependency cycle detected: {cycle:?}")]
+    DependencyCycle { cycle: Vec<String> },
+    #[error("unit `{unit}` requests unknown capability `{capability}` in `{location:?}`")]
+    UnknownCapability {
+        unit: String,
+        capability: String,
+        location: CapabilityListKind,
+    },
+    #[error("duplicate unit name `{unit}` in manifest set")]
+    DuplicateUnitName { unit: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TriggerValidationDetail {
+    EmptyCommands,
+    EmptyRegexPattern,
+    InvalidRegexPattern { message: String },
+    EmptyEventList,
+    BlankCommandName,
+}
+
+impl std::fmt::Display for TriggerValidationDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyCommands => f.write_str("command trigger requires at least one command"),
+            Self::EmptyRegexPattern => f.write_str("regex trigger requires a non-empty pattern"),
+            Self::InvalidRegexPattern { message } => {
+                write!(f, "regex pattern failed to compile: {message}")
+            }
+            Self::EmptyEventList => f.write_str("event_type trigger requires at least one event"),
+            Self::BlankCommandName => f.write_str("command trigger contains a blank command name"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimeoutValidationDetail {
+    NonPositiveTimeout,
+}
+
+impl std::fmt::Display for TimeoutValidationDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonPositiveTimeout => f.write_str("Service.TimeoutSec must be greater than zero"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RetryValidationDetail {
+    RestartDelayRequiresRetries,
+    RetryCountRequiresRestart,
+    NonPositiveRestartDelay,
+}
+
+impl std::fmt::Display for RetryValidationDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RestartDelayRequiresRetries => f.write_str(
+                "Service.RestartSec must stay at the safe default when Restart = \"no\"",
+            ),
+            Self::RetryCountRequiresRestart => {
+                f.write_str("Service.MaxRetries must be zero when Restart = \"no\"")
+            }
+            Self::NonPositiveRestartDelay => {
+                f.write_str("Service.RestartSec must be greater than zero when restart is enabled")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CapabilityListKind {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnitDependencyRelation {
+    After,
+    Requires,
+    Wants,
+}
+
+fn validate_trigger(unit_name: &str, trigger: &TriggerSpec, issues: &mut Vec<UnitValidationError>) {
+    match trigger {
+        TriggerSpec::Command { commands } => {
+            if commands.is_empty() {
+                issues.push(UnitValidationError::InvalidTriggerShape {
+                    unit: unit_name.to_owned(),
+                    trigger_type: TriggerType::Command,
+                    detail: TriggerValidationDetail::EmptyCommands,
+                });
+            }
+
+            for command in commands {
+                if command.trim().is_empty() {
+                    issues.push(UnitValidationError::InvalidTriggerShape {
+                        unit: unit_name.to_owned(),
+                        trigger_type: TriggerType::Command,
+                        detail: TriggerValidationDetail::BlankCommandName,
+                    });
+                }
+            }
+        }
+        TriggerSpec::Regex { pattern } => {
+            if pattern.trim().is_empty() {
+                issues.push(UnitValidationError::InvalidTriggerShape {
+                    unit: unit_name.to_owned(),
+                    trigger_type: TriggerType::Regex,
+                    detail: TriggerValidationDetail::EmptyRegexPattern,
+                });
+            } else if let Err(error) = Regex::new(pattern) {
+                issues.push(UnitValidationError::InvalidTriggerShape {
+                    unit: unit_name.to_owned(),
+                    trigger_type: TriggerType::Regex,
+                    detail: TriggerValidationDetail::InvalidRegexPattern {
+                        message: error.to_string(),
+                    },
+                });
+            }
+        }
+        TriggerSpec::EventType { events } => {
+            if events.is_empty() {
+                issues.push(UnitValidationError::InvalidTriggerShape {
+                    unit: unit_name.to_owned(),
+                    trigger_type: TriggerType::EventType,
+                    detail: TriggerValidationDetail::EmptyEventList,
+                });
+            }
+        }
+    }
+}
+
+fn validate_service(unit_name: &str, service: &ServiceSpec, issues: &mut Vec<UnitValidationError>) {
+    if service.timeout_sec == 0 {
+        issues.push(UnitValidationError::InvalidTimeoutShape {
+            unit: unit_name.to_owned(),
+            detail: TimeoutValidationDetail::NonPositiveTimeout,
+        });
+    }
+
+    match service.restart {
+        RestartPolicy::No => {
+            if service.max_retries > 0 {
+                issues.push(UnitValidationError::InvalidRetryPolicy {
+                    unit: unit_name.to_owned(),
+                    detail: RetryValidationDetail::RetryCountRequiresRestart,
+                });
+            }
+
+            if service.restart_sec != default_restart_sec() {
+                issues.push(UnitValidationError::InvalidRetryPolicy {
+                    unit: unit_name.to_owned(),
+                    detail: RetryValidationDetail::RestartDelayRequiresRetries,
+                });
+            }
+        }
+        RestartPolicy::OnFailure | RestartPolicy::Always => {
+            if service.restart_sec == 0 {
+                issues.push(UnitValidationError::InvalidRetryPolicy {
+                    unit: unit_name.to_owned(),
+                    detail: RetryValidationDetail::NonPositiveRestartDelay,
+                });
+            }
+        }
+    }
+}
+
+fn validate_capabilities(
+    unit_name: &str,
+    capabilities: &CapabilitiesSpec,
+    issues: &mut Vec<UnitValidationError>,
+) {
+    for capability in &capabilities.allow {
+        if !VALID_CAPABILITIES.contains(capability.as_str()) {
+            issues.push(UnitValidationError::UnknownCapability {
+                unit: unit_name.to_owned(),
+                capability: capability.clone(),
+                location: CapabilityListKind::Allow,
+            });
+        }
+    }
+
+    for capability in &capabilities.deny {
+        if !VALID_CAPABILITIES.contains(capability.as_str()) {
+            issues.push(UnitValidationError::UnknownCapability {
+                unit: unit_name.to_owned(),
+                capability: capability.clone(),
+                location: CapabilityListKind::Deny,
+            });
+        }
+    }
+}
+
+fn validate_dependencies(manifests: &[UnitManifest], issues: &mut Vec<UnitValidationError>) {
+    let mut names = HashMap::new();
+
+    for manifest in manifests {
+        let unit_name = manifest.name().to_owned();
+        if names.insert(unit_name.clone(), manifest).is_some() {
+            issues.push(UnitValidationError::DuplicateUnitName { unit: unit_name });
+        }
+    }
+
+    for manifest in manifests {
+        let unit_name = manifest.name().to_owned();
+        for dependency in &manifest.unit.after {
+            if !names.contains_key(dependency) {
+                issues.push(UnitValidationError::MissingDependency {
+                    unit: unit_name.clone(),
+                    dependency: dependency.clone(),
+                    relation: UnitDependencyRelation::After,
+                });
+            }
+        }
+        for dependency in &manifest.unit.requires {
+            if !names.contains_key(dependency) {
+                issues.push(UnitValidationError::MissingDependency {
+                    unit: unit_name.clone(),
+                    dependency: dependency.clone(),
+                    relation: UnitDependencyRelation::Requires,
+                });
+            }
+        }
+        for dependency in &manifest.unit.wants {
+            if !names.contains_key(dependency) {
+                issues.push(UnitValidationError::MissingDependency {
+                    unit: unit_name.clone(),
+                    dependency: dependency.clone(),
+                    relation: UnitDependencyRelation::Wants,
+                });
+            }
+        }
+    }
+
+    let graph = manifests
+        .iter()
+        .map(|manifest| {
+            let dependencies = manifest
+                .unit
+                .after
+                .iter()
+                .chain(&manifest.unit.requires)
+                .chain(&manifest.unit.wants)
+                .filter(|dependency| names.contains_key((*dependency).as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            (manifest.name().to_owned(), dependencies)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut visited = HashSet::new();
+    let mut active = HashSet::new();
+    let mut stack = Vec::new();
+    let mut cycles = BTreeSet::new();
+
+    for name in graph.keys() {
+        collect_dependency_cycles(
+            name,
+            &graph,
+            &mut visited,
+            &mut active,
+            &mut stack,
+            &mut cycles,
+        );
+    }
+
+    for cycle in cycles {
+        issues.push(UnitValidationError::DependencyCycle {
+            cycle: cycle.into_iter().collect(),
+        });
+    }
+}
+
+fn collect_dependency_cycles(
+    current: &str,
+    graph: &HashMap<String, Vec<String>>,
+    visited: &mut HashSet<String>,
+    active: &mut HashSet<String>,
+    stack: &mut Vec<String>,
+    cycles: &mut BTreeSet<Vec<String>>,
+) {
+    if active.contains(current) {
+        if let Some(index) = stack.iter().position(|entry| entry == current) {
+            let mut cycle = stack[index..].to_vec();
+            cycle.push(current.to_owned());
+            let canonical = canonicalize_cycle(cycle);
+            cycles.insert(canonical);
+        }
+        return;
+    }
+
+    if !visited.insert(current.to_owned()) {
+        return;
+    }
+
+    active.insert(current.to_owned());
+    stack.push(current.to_owned());
+
+    if let Some(dependencies) = graph.get(current) {
+        for dependency in dependencies {
+            collect_dependency_cycles(dependency, graph, visited, active, stack, cycles);
+        }
+    }
+
+    stack.pop();
+    active.remove(current);
+}
+
+fn canonicalize_cycle(mut cycle: Vec<String>) -> Vec<String> {
+    if cycle.len() <= 1 {
+        return cycle;
+    }
+
+    cycle.pop();
+    let pivot = cycle
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    cycle.rotate_left(pivot);
+    cycle.push(cycle[0].clone());
+    cycle
+}
+
+fn format_issues(issues: &[UnitValidationError]) -> String {
+    issues
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]
@@ -628,6 +1097,261 @@ AllowManualInvoke = true
                 ..RuntimeSpec::default()
             }
         );
+    }
+
+    #[test]
+    fn load_and_validate_rejects_unknown_trigger_type() {
+        let error = UnitManifest::load_and_validate_toml_str(
+            r#"
+[Unit]
+Name = "unknown-trigger.unit"
+
+[Trigger]
+Type = "semantic"
+Namespace = "moderation"
+
+[Service]
+ExecStart = "scripts/moderation/warn.rhai"
+"#,
+        )
+        .expect_err("unknown trigger type should fail during load");
+
+        match error {
+            UnitManifestCheckError::Load(UnitManifestLoadError::ParseToml {
+                source_name,
+                source,
+            }) => {
+                assert_eq!(source_name, "<inline unit manifest>");
+                assert!(source.to_string().contains("semantic"));
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_and_validate_rejects_missing_exec_start() {
+        let error = UnitManifest::load_and_validate_toml_str(
+            r#"
+[Unit]
+Name = "missing-exec-start.unit"
+
+[Trigger]
+Type = "event_type"
+Events = ["job"]
+
+[Service]
+TimeoutSec = 3
+"#,
+        )
+        .expect_err("missing ExecStart should fail during load");
+
+        match error {
+            UnitManifestCheckError::Load(UnitManifestLoadError::ParseToml { source, .. }) => {
+                assert!(source.to_string().contains("ExecStart"));
+            }
+            other => panic!("expected parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_trigger_timeout_retry_and_capability_shapes() {
+        let manifest = UnitManifest {
+            unit: UnitDefinition::new("moderation.invalid.unit"),
+            trigger: TriggerSpec::Command {
+                commands: vec!["warn".into(), " ".into()],
+            },
+            service: ServiceSpec {
+                exec_start: "  ".into(),
+                timeout_sec: 0,
+                restart: RestartPolicy::No,
+                restart_sec: 5,
+                max_retries: 2,
+                ..ServiceSpec::new("scripts/moderation/warn.rhai")
+            },
+            capabilities: CapabilitiesSpec {
+                allow: vec![
+                    "tg.moderate.restrict".into(),
+                    "telegram.delete_message".into(),
+                ],
+                deny: vec!["sys.shell.exec".into()],
+            },
+            runtime: RuntimeSpec::default(),
+        };
+
+        let error = manifest
+            .validate()
+            .expect_err("invalid manifest should not validate");
+
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::MissingExecStart {
+                    unit: "moderation.invalid.unit".into(),
+                })
+        );
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::InvalidTriggerShape {
+                    unit: "moderation.invalid.unit".into(),
+                    trigger_type: TriggerType::Command,
+                    detail: TriggerValidationDetail::BlankCommandName,
+                })
+        );
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::InvalidTimeoutShape {
+                    unit: "moderation.invalid.unit".into(),
+                    detail: TimeoutValidationDetail::NonPositiveTimeout,
+                })
+        );
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::InvalidRetryPolicy {
+                    unit: "moderation.invalid.unit".into(),
+                    detail: RetryValidationDetail::RetryCountRequiresRestart,
+                })
+        );
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::InvalidRetryPolicy {
+                    unit: "moderation.invalid.unit".into(),
+                    detail: RetryValidationDetail::RestartDelayRequiresRetries,
+                })
+        );
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::UnknownCapability {
+                    unit: "moderation.invalid.unit".into(),
+                    capability: "telegram.delete_message".into(),
+                    location: CapabilityListKind::Allow,
+                })
+        );
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::UnknownCapability {
+                    unit: "moderation.invalid.unit".into(),
+                    capability: "sys.shell.exec".into(),
+                    location: CapabilityListKind::Deny,
+                })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_invalid_regex_trigger_shape() {
+        let manifest = UnitManifest::new(
+            UnitDefinition::new("moderation.regex.unit"),
+            TriggerSpec::Regex {
+                pattern: "(".into(),
+            },
+            ServiceSpec::new("scripts/moderation/regex.rhai"),
+        );
+
+        let error = manifest
+            .validate()
+            .expect_err("invalid regex pattern should fail validation");
+
+        assert!(matches!(
+            error.issues(),
+            [UnitValidationError::InvalidTriggerShape {
+                trigger_type: TriggerType::Regex,
+                detail: TriggerValidationDetail::InvalidRegexPattern { .. },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn validate_set_rejects_missing_dependency_and_dependency_cycle() {
+        let alpha = UnitManifest {
+            unit: UnitDefinition {
+                name: "alpha.unit".into(),
+                requires: vec!["beta.unit".into()],
+                ..UnitDefinition::new("alpha.unit")
+            },
+            trigger: TriggerSpec::event_type([UnitEventType::Job]),
+            service: ServiceSpec::new("scripts/alpha.rhai"),
+            capabilities: CapabilitiesSpec {
+                allow: vec!["job.schedule".into()],
+                deny: Vec::new(),
+            },
+            runtime: RuntimeSpec::default(),
+        };
+        let beta = UnitManifest {
+            unit: UnitDefinition {
+                name: "beta.unit".into(),
+                requires: vec!["alpha.unit".into()],
+                wants: vec!["missing.unit".into()],
+                ..UnitDefinition::new("beta.unit")
+            },
+            trigger: TriggerSpec::event_type([UnitEventType::Job]),
+            service: ServiceSpec::new("scripts/beta.rhai"),
+            capabilities: CapabilitiesSpec {
+                allow: vec!["job.schedule".into()],
+                deny: Vec::new(),
+            },
+            runtime: RuntimeSpec::default(),
+        };
+
+        let error = UnitManifest::validate_set(&[alpha, beta])
+            .expect_err("invalid dependency graph should fail validation");
+
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::MissingDependency {
+                    unit: "beta.unit".into(),
+                    dependency: "missing.unit".into(),
+                    relation: UnitDependencyRelation::Wants,
+                })
+        );
+        assert!(
+            error
+                .issues()
+                .contains(&UnitValidationError::DependencyCycle {
+                    cycle: vec!["alpha.unit".into(), "beta.unit".into(), "alpha.unit".into()],
+                })
+        );
+    }
+
+    #[test]
+    fn validate_set_accepts_valid_manifest_graph() {
+        let storage = UnitManifest {
+            unit: UnitDefinition::new("storage.sqlite"),
+            trigger: TriggerSpec::event_type([UnitEventType::Job]),
+            service: ServiceSpec::new("scripts/storage.rhai"),
+            capabilities: CapabilitiesSpec {
+                allow: vec!["db.user.read".into()],
+                deny: Vec::new(),
+            },
+            runtime: RuntimeSpec::default(),
+        };
+        let warn = UnitManifest {
+            unit: UnitDefinition {
+                name: "moderation.warn.unit".into(),
+                requires: vec!["storage.sqlite".into()],
+                ..UnitDefinition::new("moderation.warn.unit")
+            },
+            trigger: TriggerSpec::command(["warn"]),
+            service: ServiceSpec {
+                restart: RestartPolicy::OnFailure,
+                restart_sec: 2,
+                max_retries: 3,
+                ..ServiceSpec::new("scripts/moderation/warn.rhai")
+            },
+            capabilities: CapabilitiesSpec {
+                allow: vec!["tg.moderate.restrict".into(), "audit.compensate".into()],
+                deny: vec!["sys.http.fetch".into()],
+            },
+            runtime: RuntimeSpec::default(),
+        };
+
+        UnitManifest::validate_set(&[storage, warn]).expect("valid manifest set should pass");
     }
 
     fn write_manifest(file_name: &str, contents: &str) -> PathBuf {
