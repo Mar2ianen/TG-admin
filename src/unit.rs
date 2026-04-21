@@ -1,6 +1,26 @@
 #![allow(dead_code)]
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum UnitManifestLoadError {
+    #[error("failed to read unit manifest at {path}: {source}")]
+    ReadFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse unit manifest TOML from {source_name}: {source}")]
+    ParseToml {
+        source_name: String,
+        #[source]
+        source: toml::de::Error,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitManifest {
@@ -29,6 +49,31 @@ impl UnitManifest {
 
     pub fn name(&self) -> &str {
         &self.unit.name
+    }
+
+    pub fn from_toml_str(input: &str) -> Result<Self, UnitManifestLoadError> {
+        Self::from_toml_source(input, "<inline unit manifest>")
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, UnitManifestLoadError> {
+        let path = path.as_ref();
+        let contents =
+            fs::read_to_string(path).map_err(|source| UnitManifestLoadError::ReadFile {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+        Self::from_toml_source(&contents, path.display().to_string())
+    }
+
+    fn from_toml_source(
+        input: &str,
+        source_name: impl Into<String>,
+    ) -> Result<Self, UnitManifestLoadError> {
+        toml::from_str(input).map_err(|source| UnitManifestLoadError::ParseToml {
+            source_name: source_name.into(),
+            source,
+        })
     }
 }
 
@@ -299,6 +344,7 @@ const fn default_restart_sec() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn unit_definition_defaults_to_enabled_with_empty_collections() {
@@ -396,5 +442,199 @@ mod tests {
         assert!(!runtime.idempotent_by_default);
         assert!(!runtime.allow_in_recovery);
         assert!(!runtime.allow_manual_invoke);
+    }
+
+    #[test]
+    fn parses_valid_minimal_unit_manifest_from_inline_toml() {
+        let manifest = UnitManifest::from_toml_str(
+            r#"
+[Unit]
+Name = "healthcheck.unit"
+
+[Trigger]
+Type = "event_type"
+Events = ["job"]
+
+[Service]
+ExecStart = "scripts/healthcheck.rhai"
+"#,
+        )
+        .expect("minimal unit manifest should parse");
+
+        assert_eq!(manifest.name(), "healthcheck.unit");
+        assert_eq!(manifest.unit, UnitDefinition::new("healthcheck.unit"));
+        assert_eq!(
+            manifest.trigger,
+            TriggerSpec::EventType {
+                events: vec![UnitEventType::Job],
+            }
+        );
+        assert_eq!(
+            manifest.service,
+            ServiceSpec::new("scripts/healthcheck.rhai")
+        );
+        assert_eq!(manifest.capabilities, CapabilitiesSpec::default());
+        assert_eq!(manifest.runtime, RuntimeSpec::default());
+    }
+
+    #[test]
+    fn parses_valid_moderation_command_unit_manifest_from_file() {
+        let manifest_path = write_manifest(
+            "warn-moderation.unit.toml",
+            r#"
+[Unit]
+Name = "moderation.warn.unit"
+Description = "Warn or mute users based on moderation command invocations"
+After = ["bootstrap.runtime"]
+Requires = ["storage.sqlite"]
+Wants = ["audit.log"]
+Enabled = true
+Tags = ["moderation", "command"]
+Owner = "ops"
+Version = "1.0.0"
+
+[Trigger]
+Type = "command"
+Commands = ["warn", "mute", "del"]
+
+[Service]
+ExecStart = "scripts/moderation/warn.rhai"
+EntryPoint = "main"
+TimeoutSec = 8
+Restart = "on-failure"
+RestartSec = 5
+MaxRetries = 3
+OnFailure = "moderation.alert.unit"
+
+[Capabilities]
+Allow = ["telegram.delete_message", "telegram.restrict_member", "audit.write"]
+Deny = ["http.external"]
+
+[Runtime]
+MaxMemoryKb = 65536
+MaxOutputBytes = 16384
+DryRunSupported = true
+IdempotentByDefault = true
+AllowInRecovery = true
+AllowManualInvoke = true
+"#,
+        );
+
+        let manifest = UnitManifest::from_path(&manifest_path)
+            .expect("moderation command unit manifest should parse from file");
+
+        assert_eq!(manifest.name(), "moderation.warn.unit");
+        assert_eq!(
+            manifest.unit.description.as_deref(),
+            Some("Warn or mute users based on moderation command invocations")
+        );
+        assert_eq!(manifest.unit.after, vec!["bootstrap.runtime"]);
+        assert_eq!(manifest.unit.requires, vec!["storage.sqlite"]);
+        assert_eq!(manifest.unit.wants, vec!["audit.log"]);
+        assert!(manifest.unit.enabled);
+        assert_eq!(manifest.unit.tags, vec!["moderation", "command"]);
+        assert_eq!(manifest.unit.owner.as_deref(), Some("ops"));
+        assert_eq!(manifest.unit.version.as_deref(), Some("1.0.0"));
+
+        assert_eq!(
+            manifest.trigger,
+            TriggerSpec::Command {
+                commands: vec!["warn".into(), "mute".into(), "del".into()],
+            }
+        );
+        assert_eq!(manifest.trigger.trigger_type(), TriggerType::Command);
+
+        assert_eq!(manifest.service.exec_start, "scripts/moderation/warn.rhai");
+        assert_eq!(manifest.service.entry_point.as_deref(), Some("main"));
+        assert_eq!(manifest.service.timeout_sec, 8);
+        assert_eq!(manifest.service.restart, RestartPolicy::OnFailure);
+        assert_eq!(manifest.service.restart_sec, 5);
+        assert_eq!(manifest.service.max_retries, 3);
+        assert_eq!(
+            manifest.service.on_failure.as_deref(),
+            Some("moderation.alert.unit")
+        );
+
+        assert_eq!(
+            manifest.capabilities,
+            CapabilitiesSpec {
+                allow: vec![
+                    "telegram.delete_message".into(),
+                    "telegram.restrict_member".into(),
+                    "audit.write".into(),
+                ],
+                deny: vec!["http.external".into()],
+            }
+        );
+        assert_eq!(
+            manifest.runtime,
+            RuntimeSpec {
+                max_memory_kb: Some(65536),
+                max_output_bytes: Some(16384),
+                dry_run_supported: true,
+                idempotent_by_default: true,
+                allow_in_recovery: true,
+                allow_manual_invoke: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_regex_trigger_and_service_runtime_shapes() {
+        let manifest = UnitManifest::from_toml_str(
+            r#"
+[Unit]
+Name = "spam.regex.unit"
+Enabled = false
+
+[Trigger]
+Type = "regex"
+Pattern = "(?i)free\\s+nitro"
+
+[Service]
+ExecStart = "scripts/moderation/spam.rhai"
+
+[Capabilities]
+Allow = ["telegram.delete_message"]
+
+[Runtime]
+AllowManualInvoke = true
+"#,
+        )
+        .expect("regex unit manifest should parse");
+
+        assert!(!manifest.unit.enabled);
+        assert_eq!(
+            manifest.trigger,
+            TriggerSpec::Regex {
+                pattern: "(?i)free\\s+nitro".into(),
+            }
+        );
+        assert_eq!(manifest.service.timeout_sec, 3);
+        assert_eq!(manifest.service.restart, RestartPolicy::No);
+        assert_eq!(manifest.service.restart_sec, 1);
+        assert_eq!(manifest.service.max_retries, 0);
+        assert_eq!(
+            manifest.capabilities,
+            CapabilitiesSpec {
+                allow: vec!["telegram.delete_message".into()],
+                deny: Vec::new(),
+            }
+        );
+        assert_eq!(
+            manifest.runtime,
+            RuntimeSpec {
+                allow_manual_invoke: true,
+                ..RuntimeSpec::default()
+            }
+        );
+    }
+
+    fn write_manifest(file_name: &str, contents: &str) -> PathBuf {
+        let file = NamedTempFile::with_suffix(file_name).expect("temp manifest file");
+        std::fs::write(file.path(), contents).expect("write manifest fixture");
+        file.into_temp_path()
+            .keep()
+            .expect("persist manifest fixture")
     }
 }
