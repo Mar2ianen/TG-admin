@@ -390,7 +390,7 @@ impl HostApi {
         request: MsgWindowRequest,
     ) -> Result<HostApiResponse<MsgWindowValue>, HostApiError> {
         validate_event(event, HostApiOperation::MsgWindow)?;
-        self.require_capability(event, HostApiOperation::MsgWindow, "msg.history.read")?;
+        self.require_operation_capability(event, HostApiOperation::MsgWindow)?;
         validate_msg_window_request(&request, HostApiOperation::MsgWindow)?;
 
         let messages = self
@@ -413,7 +413,7 @@ impl HostApi {
         request: MsgByUserRequest,
     ) -> Result<HostApiResponse<MsgByUserValue>, HostApiError> {
         validate_event(event, HostApiOperation::MsgByUser)?;
-        self.require_capability(event, HostApiOperation::MsgByUser, "msg.history.read")?;
+        self.require_operation_capability(event, HostApiOperation::MsgByUser)?;
         validate_msg_by_user_request(&request, HostApiOperation::MsgByUser)?;
 
         let messages = self
@@ -435,7 +435,7 @@ impl HostApi {
         request: JobScheduleAfterRequest,
     ) -> Result<HostApiResponse<JobScheduleAfterValue>, HostApiError> {
         validate_event(event, HostApiOperation::JobScheduleAfter)?;
-        self.require_capability(event, HostApiOperation::JobScheduleAfter, "job.schedule")?;
+        self.require_operation_capability(event, HostApiOperation::JobScheduleAfter)?;
         validate_job_schedule_request(&request, HostApiOperation::JobScheduleAfter)?;
 
         let parsed_delay = self
@@ -498,7 +498,7 @@ impl HostApi {
         request: AuditFindRequest,
     ) -> Result<HostApiResponse<AuditFindValue>, HostApiError> {
         validate_event(event, HostApiOperation::AuditFind)?;
-        self.require_capability(event, HostApiOperation::AuditFind, "audit.read")?;
+        self.require_operation_capability(event, HostApiOperation::AuditFind)?;
         validate_audit_find_request(&request, HostApiOperation::AuditFind)?;
 
         let entries = self
@@ -515,7 +515,7 @@ impl HostApi {
         request: AuditCompensateRequest,
     ) -> Result<HostApiResponse<AuditCompensateValue>, HostApiError> {
         validate_event(event, HostApiOperation::AuditCompensate)?;
-        self.require_capability(event, HostApiOperation::AuditCompensate, "audit.compensate")?;
+        self.require_operation_capability(event, HostApiOperation::AuditCompensate)?;
         validate_non_empty(
             &request.action_id,
             "action_id",
@@ -628,6 +628,18 @@ impl HostApi {
         }
     }
 
+    fn require_operation_capability(
+        &self,
+        event: &EventContext,
+        operation: HostApiOperation,
+    ) -> Result<(), HostApiError> {
+        if let Some(capability) = required_capability(operation) {
+            self.require_capability(event, operation, capability)?;
+        }
+
+        Ok(())
+    }
+
     fn require_capability(
         &self,
         event: &EventContext,
@@ -683,6 +695,25 @@ impl HostApi {
         }
 
         Ok(())
+    }
+}
+
+fn required_capability(operation: HostApiOperation) -> Option<&'static str> {
+    match operation {
+        HostApiOperation::MsgWindow | HostApiOperation::MsgByUser => Some("msg.history.read"),
+        HostApiOperation::JobScheduleAfter => Some("job.schedule"),
+        HostApiOperation::AuditFind => Some("audit.read"),
+        HostApiOperation::AuditCompensate => Some("audit.compensate"),
+        HostApiOperation::CtxCurrent
+        | HostApiOperation::CtxResolveTarget
+        | HostApiOperation::CtxParseDuration
+        | HostApiOperation::CtxExpandReason
+        | HostApiOperation::DbUserGet
+        | HostApiOperation::DbUserPatch
+        | HostApiOperation::DbUserIncr
+        | HostApiOperation::DbKvGet
+        | HostApiOperation::DbKvSet
+        | HostApiOperation::UnitStatus => None,
     }
 }
 
@@ -1887,6 +1918,86 @@ mod tests {
     }
 
     #[test]
+    fn db_user_get_rejects_zero_user_id() {
+        let event = manual_event();
+        let (_dir, api) = storage_api();
+
+        let error = api
+            .db_user_get(&event, DbUserGetRequest { user_id: 0 })
+            .expect_err("zero user id must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(error.operation, HostApiOperation::DbUserGet);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::InvalidField {
+                field: "user_id".to_owned(),
+                message: "must be non-zero".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn db_user_get_requires_storage_resource() {
+        let event = manual_event();
+        let api = HostApi::new(false);
+
+        let error = api
+            .db_user_get(&event, DbUserGetRequest { user_id: 77 })
+            .expect_err("missing storage must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Internal);
+        assert_eq!(error.operation, HostApiOperation::DbUserGet);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::ResourceUnavailable {
+                resource: "storage".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn db_user_patch_persists_user_on_happy_path() {
+        let event = manual_event();
+        let (_dir, api) = storage_api();
+
+        let response = api
+            .db_user_patch(
+                &event,
+                DbUserPatchRequest {
+                    patch: UserPatch {
+                        user_id: 77,
+                        username: Some("patched_user".to_owned()),
+                        display_name: Some("Patched User".to_owned()),
+                        seen_at: "2026-04-21T12:05:00Z".to_owned(),
+                        warn_count: Some(2),
+                        shadowbanned: Some(false),
+                        reputation: Some(9),
+                        state_json: Some("{\"state\":\"patched\"}".to_owned()),
+                        updated_at: "2026-04-21T12:05:00Z".to_owned(),
+                    },
+                },
+            )
+            .expect("patch succeeds");
+
+        assert!(!response.dry_run);
+        assert_eq!(
+            response.value.user.username.as_deref(),
+            Some("patched_user")
+        );
+        assert_eq!(
+            api.storage(HostApiOperation::DbUserPatch)
+                .expect("storage")
+                .get_user(77)
+                .expect("query succeeds")
+                .expect("user exists")
+                .username
+                .as_deref(),
+            Some("patched_user")
+        );
+    }
+
+    #[test]
     fn db_user_patch_dry_run_validates_without_mutation() {
         let event = manual_event();
         let (_dir, api) = dry_run_storage_api();
@@ -2040,6 +2151,39 @@ mod tests {
     }
 
     #[test]
+    fn db_user_incr_dry_run_does_not_mutate_storage() {
+        let event = manual_event();
+        let (_dir, api) = dry_run_storage_api();
+
+        let response = api
+            .db_user_incr(
+                &event,
+                DbUserIncrRequest {
+                    user_id: 77,
+                    username: Some("dry_increment".to_owned()),
+                    display_name: Some("Dry Increment".to_owned()),
+                    seen_at: "2026-04-21T12:10:00Z".to_owned(),
+                    updated_at: "2026-04-21T12:10:00Z".to_owned(),
+                    warn_count_delta: 2,
+                    reputation_delta: 4,
+                    shadowbanned: Some(false),
+                    state_json: Some("{\"dry\":true}".to_owned()),
+                },
+            )
+            .expect("dry-run increment succeeds");
+
+        assert!(response.dry_run);
+        assert_eq!(response.value.user.warn_count, 2);
+        assert!(
+            api.storage(HostApiOperation::DbUserIncr)
+                .expect("storage")
+                .get_user(77)
+                .expect("query succeeds")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn db_kv_set_dry_run_does_not_mutate_storage() {
         let event = manual_event();
         let (_dir, api) = dry_run_storage_api();
@@ -2103,6 +2247,65 @@ mod tests {
     }
 
     #[test]
+    fn db_kv_get_rejects_blank_key() {
+        let event = manual_event();
+        let (_dir, api) = storage_api();
+
+        let error = api
+            .db_kv_get(
+                &event,
+                DbKvGetRequest {
+                    scope_kind: "chat".to_owned(),
+                    scope_id: "-100123".to_owned(),
+                    key: "   ".to_owned(),
+                },
+            )
+            .expect_err("blank key must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(error.operation, HostApiOperation::DbKvGet);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::InvalidField {
+                field: "key".to_owned(),
+                message: "must not be blank".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn db_kv_set_persists_entry_on_happy_path() {
+        let event = manual_event();
+        let (_dir, api) = storage_api();
+
+        let response = api
+            .db_kv_set(
+                &event,
+                DbKvSetRequest {
+                    entry: KvEntry {
+                        scope_kind: "chat".to_owned(),
+                        scope_id: "-100123".to_owned(),
+                        key: "policy".to_owned(),
+                        value_json: "{\"mode\":\"strict\"}".to_owned(),
+                        updated_at: "2026-04-21T12:00:00Z".to_owned(),
+                    },
+                },
+            )
+            .expect("kv set succeeds");
+
+        assert!(!response.dry_run);
+        assert_eq!(
+            api.storage(HostApiOperation::DbKvSet)
+                .expect("storage")
+                .get_kv("chat", "-100123", "policy")
+                .expect("query succeeds")
+                .expect("entry exists")
+                .value_json,
+            "{\"mode\":\"strict\"}"
+        );
+    }
+
+    #[test]
     fn msg_window_returns_anchor_window() {
         let event = manual_event();
         let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], false);
@@ -2155,6 +2358,58 @@ mod tests {
     }
 
     #[test]
+    fn msg_window_denies_when_capability_is_missing() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], false);
+
+        let error = api
+            .msg_window(
+                &event,
+                MsgWindowRequest {
+                    chat_id: -100123,
+                    anchor_message_id: 81231,
+                    up: 1,
+                    down: 1,
+                    include_anchor: true,
+                },
+            )
+            .expect_err("missing capability must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Denied);
+        assert_eq!(error.operation, HostApiOperation::MsgWindow);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::CapabilityDenied {
+                capability: "msg.history.read".to_owned(),
+                unit_id: "moderation.test".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn msg_window_preserves_dry_run_metadata_for_reads() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], true);
+        seed_message_journal(&api);
+
+        let response = api
+            .msg_window(
+                &event,
+                MsgWindowRequest {
+                    chat_id: -100123,
+                    anchor_message_id: 81231,
+                    up: 1,
+                    down: 1,
+                    include_anchor: true,
+                },
+            )
+            .expect("msg window succeeds");
+
+        assert!(response.dry_run);
+        assert_eq!(response.value.messages.len(), 3);
+    }
+
+    #[test]
     fn msg_by_user_returns_recent_messages_for_user() {
         let event = manual_event();
         let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], false);
@@ -2175,6 +2430,84 @@ mod tests {
         assert_eq!(response.operation, HostApiOperation::MsgByUser);
         assert_eq!(response.value.messages.len(), 3);
         assert_eq!(response.value.messages[0].message_id, 81233);
+    }
+
+    #[test]
+    fn msg_by_user_rejects_invalid_since_timestamp() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], false);
+
+        let error = api
+            .msg_by_user(
+                &event,
+                MsgByUserRequest {
+                    chat_id: -100123,
+                    user_id: 99887766,
+                    since: "yesterday".to_owned(),
+                    limit: 3,
+                },
+            )
+            .expect_err("invalid since must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(error.operation, HostApiOperation::MsgByUser);
+        assert!(
+            matches!(
+                error.detail,
+                HostApiErrorDetail::InvalidField { ref field, .. } if field == "since"
+            ),
+            "unexpected error detail: {:?}",
+            error.detail
+        );
+    }
+
+    #[test]
+    fn msg_by_user_denies_when_capability_is_missing() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], false);
+
+        let error = api
+            .msg_by_user(
+                &event,
+                MsgByUserRequest {
+                    chat_id: -100123,
+                    user_id: 99887766,
+                    since: "2026-04-21T11:59:05Z".to_owned(),
+                    limit: 3,
+                },
+            )
+            .expect_err("missing capability must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Denied);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::CapabilityDenied {
+                capability: "msg.history.read".to_owned(),
+                unit_id: "moderation.test".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn msg_by_user_preserves_dry_run_metadata_for_reads() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], true);
+        seed_message_journal(&api);
+
+        let response = api
+            .msg_by_user(
+                &event,
+                MsgByUserRequest {
+                    chat_id: -100123,
+                    user_id: 99887766,
+                    since: "2026-04-21T11:59:05Z".to_owned(),
+                    limit: 2,
+                },
+            )
+            .expect("msg.by_user succeeds");
+
+        assert!(response.dry_run);
+        assert_eq!(response.value.messages.len(), 2);
     }
 
     #[test]
@@ -2237,6 +2570,65 @@ mod tests {
     }
 
     #[test]
+    fn job_schedule_after_persists_job_on_happy_path() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["job.schedule"], &[], false);
+
+        let response = api
+            .job_schedule_after(
+                &event,
+                JobScheduleAfterRequest {
+                    delay: "2h".to_owned(),
+                    executor_unit: "moderation.mute_release".to_owned(),
+                    payload: json!({"kind":"host_op","op":"tg.send_ui"}),
+                    dedupe_key: Some("mute:99887766".to_owned()),
+                    max_retries: Some(2),
+                    audit_action_id: Some("act_1".to_owned()),
+                },
+            )
+            .expect("job schedule succeeds");
+
+        assert!(!response.dry_run);
+        assert_eq!(response.value.job.executor_unit, "moderation.mute_release");
+        assert!(
+            api.storage(HostApiOperation::JobScheduleAfter)
+                .expect("storage")
+                .get_job(&response.value.job.job_id)
+                .expect("lookup succeeds")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn job_schedule_after_denies_when_capability_is_missing() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], false);
+
+        let error = api
+            .job_schedule_after(
+                &event,
+                JobScheduleAfterRequest {
+                    delay: "2h".to_owned(),
+                    executor_unit: "moderation.mute_release".to_owned(),
+                    payload: json!({"kind":"host_op"}),
+                    dedupe_key: None,
+                    max_retries: None,
+                    audit_action_id: None,
+                },
+            )
+            .expect_err("missing capability must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Denied);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::CapabilityDenied {
+                capability: "job.schedule".to_owned(),
+                unit_id: "moderation.test".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn audit_find_returns_matching_entries() {
         let event = manual_event();
         let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], false);
@@ -2277,6 +2669,58 @@ mod tests {
 
         assert_eq!(error.kind, HostApiErrorKind::Validation);
         assert_eq!(error.detail, HostApiErrorDetail::MissingAuditFilter);
+    }
+
+    #[test]
+    fn audit_find_denies_when_capability_is_missing() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["job.schedule"], &[], false);
+
+        let error = api
+            .audit_find(
+                &event,
+                AuditFindRequest {
+                    filters: AuditLogFilter {
+                        trace_id: Some("trace-1".to_owned()),
+                        ..AuditLogFilter::default()
+                    },
+                    limit: 10,
+                },
+            )
+            .expect_err("missing capability must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Denied);
+        assert_eq!(error.operation, HostApiOperation::AuditFind);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::CapabilityDenied {
+                capability: "audit.read".to_owned(),
+                unit_id: "moderation.test".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn audit_find_preserves_dry_run_metadata_for_reads() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], true);
+        seed_audit_entries(&api);
+
+        let response = api
+            .audit_find(
+                &event,
+                AuditFindRequest {
+                    filters: AuditLogFilter {
+                        trigger_message_id: Some(81231),
+                        ..AuditLogFilter::default()
+                    },
+                    limit: 10,
+                },
+            )
+            .expect("audit.find succeeds");
+
+        assert!(response.dry_run);
+        assert_eq!(response.value.entries.len(), 2);
     }
 
     #[test]
@@ -2367,6 +2811,30 @@ mod tests {
     }
 
     #[test]
+    fn audit_compensate_returns_structured_unknown_action_error() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["audit.compensate"], &[], false);
+
+        let error = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "missing".to_owned(),
+                },
+            )
+            .expect_err("unknown action must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(error.operation, HostApiOperation::AuditCompensate);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::UnknownAuditAction {
+                action_id: "missing".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn unit_status_returns_summary_and_specific_entry() {
         let event = manual_event();
         let api = unit_registry_api();
@@ -2416,6 +2884,25 @@ mod tests {
                 unit_id: "missing.unit".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn unit_status_preserves_dry_run_metadata() {
+        let active = UnitManifest::new(
+            UnitDefinition::new("moderation.warn"),
+            TriggerSpec::command(["warn"]),
+            ServiceSpec::new("cargo run"),
+        );
+        let report = UnitRegistry::load_manifests(vec![active]);
+        let api = HostApi::new(true).with_unit_registry(report.registry);
+        let event = manual_event();
+
+        let response = api
+            .unit_status(&event, UnitStatusRequest { unit_id: None })
+            .expect("unit status succeeds");
+
+        assert!(response.dry_run);
+        assert_eq!(response.value.summary.total_units, 1);
     }
 
     #[test]
