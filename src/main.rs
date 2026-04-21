@@ -4,6 +4,7 @@ mod config;
 mod event;
 mod host_api;
 mod observability;
+mod parser;
 mod scheduler;
 mod shutdown;
 mod storage;
