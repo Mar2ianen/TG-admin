@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -14,6 +15,7 @@ pub type MessageId = i32;
 pub struct TelegramGateway {
     polling: bool,
     transport: Arc<dyn TelegramTransport>,
+    idempotency_cache: Arc<Mutex<HashMap<String, TelegramResult>>>,
 }
 
 impl TelegramGateway {
@@ -21,6 +23,7 @@ impl TelegramGateway {
         Self {
             polling,
             transport: Arc::new(NoopTelegramTransport),
+            idempotency_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -42,6 +45,68 @@ impl TelegramGateway {
 
     pub async fn execute(&self, request: TelegramRequest) -> Result<TelegramResult, TelegramError> {
         self.transport.execute(request).await
+    }
+
+    pub async fn execute_checked(
+        &self,
+        request: TelegramRequest,
+        options: TelegramExecutionOptions,
+    ) -> Result<TelegramExecution, TelegramError> {
+        validate_request(&request)?;
+
+        let operation = request.operation();
+        let idempotency_key = request.idempotency_key().map(ToOwned::to_owned);
+
+        if options.dry_run {
+            return Ok(TelegramExecution {
+                result: predict_result(&request),
+                metadata: TelegramExecutionMetadata {
+                    operation,
+                    dry_run: true,
+                    replayed: false,
+                    idempotency_key,
+                },
+            });
+        }
+
+        if let Some(key) = request.idempotency_key() {
+            if let Some(cached) = self
+                .idempotency_cache
+                .lock()
+                .expect("telegram idempotency cache lock poisoned")
+                .get(key)
+                .cloned()
+            {
+                return Ok(TelegramExecution {
+                    result: cached,
+                    metadata: TelegramExecutionMetadata {
+                        operation,
+                        dry_run: false,
+                        replayed: true,
+                        idempotency_key,
+                    },
+                });
+            }
+        }
+
+        let result = self.transport.execute(request).await?;
+
+        if let Some(key) = idempotency_key.clone() {
+            self.idempotency_cache
+                .lock()
+                .expect("telegram idempotency cache lock poisoned")
+                .insert(key, result.clone());
+        }
+
+        Ok(TelegramExecution {
+            result,
+            metadata: TelegramExecutionMetadata {
+                operation,
+                dry_run: false,
+                replayed: false,
+                idempotency_key,
+            },
+        })
     }
 }
 
@@ -404,6 +469,28 @@ pub enum TelegramResultKind {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramExecution {
+    pub result: TelegramResult,
+    pub metadata: TelegramExecutionMetadata,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramExecutionMetadata {
+    pub operation: TelegramOperation,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub replayed: bool,
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramExecutionOptions {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TelegramMessageResult {
     pub chat_id: ChatId,
     pub message_id: MessageId,
@@ -516,6 +603,189 @@ pub enum TelegramErrorKind {
     Internal,
 }
 
+fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
+    let operation = request.operation();
+    if operation.requires_idempotency() && request.idempotency_key().is_none() {
+        return Err(
+            TelegramError::new(
+                operation,
+                TelegramErrorKind::Validation,
+                "idempotency key is required for this operation",
+            )
+            .with_details(serde_json::json!({
+                "field": "idempotency_key",
+            })),
+        );
+    }
+
+    match request {
+        TelegramRequest::SendUi(request) => {
+            if request.template.trim().is_empty() {
+                return Err(validation_error(operation, "template", "template must not be empty"));
+            }
+        }
+        TelegramRequest::SendMessage(request) => {
+            if request.text.trim().is_empty() {
+                return Err(validation_error(operation, "text", "text must not be empty"));
+            }
+        }
+        TelegramRequest::EditUi(request) => {
+            if request.template.trim().is_empty() {
+                return Err(validation_error(operation, "template", "template must not be empty"));
+            }
+            if request.message_id <= 0 {
+                return Err(validation_error(
+                    operation,
+                    "message_id",
+                    "message_id must be positive",
+                ));
+            }
+        }
+        TelegramRequest::Delete(request) => {
+            if request.message_id <= 0 {
+                return Err(validation_error(
+                    operation,
+                    "message_id",
+                    "message_id must be positive",
+                ));
+            }
+        }
+        TelegramRequest::DeleteMany(request) => {
+            if request.message_ids.is_empty() {
+                return Err(validation_error(
+                    operation,
+                    "message_ids",
+                    "message_ids must not be empty",
+                ));
+            }
+            if request.message_ids.iter().any(|message_id| *message_id <= 0) {
+                return Err(validation_error(
+                    operation,
+                    "message_ids",
+                    "message_ids must contain only positive ids",
+                ));
+            }
+        }
+        TelegramRequest::Restrict(request) => {
+            if request.user_id <= 0 {
+                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+            }
+        }
+        TelegramRequest::Unrestrict(request) => {
+            if request.user_id <= 0 {
+                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+            }
+        }
+        TelegramRequest::Ban(request) => {
+            if request.user_id <= 0 {
+                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+            }
+        }
+        TelegramRequest::Unban(request) => {
+            if request.user_id <= 0 {
+                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+            }
+        }
+        TelegramRequest::AnswerCallback(request) => {
+            if request.callback_query_id.trim().is_empty() {
+                return Err(validation_error(
+                    operation,
+                    "callback_query_id",
+                    "callback_query_id must not be empty",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validation_error(
+    operation: TelegramOperation,
+    field: &'static str,
+    message: &'static str,
+) -> TelegramError {
+    TelegramError::new(operation, TelegramErrorKind::Validation, message).with_details(
+        serde_json::json!({
+            "field": field,
+        }),
+    )
+}
+
+fn predict_result(request: &TelegramRequest) -> TelegramResult {
+    match request {
+        TelegramRequest::SendUi(request) => TelegramResult::Ui(TelegramUiResult {
+            chat_id: request.chat_id,
+            message_id: request.reply_to_message_id.unwrap_or(0).saturating_add(1),
+            template: request.template.clone(),
+            edited: false,
+            raw_passthrough: false,
+        }),
+        TelegramRequest::SendMessage(request) => TelegramResult::Message(TelegramMessageResult {
+            chat_id: request.chat_id,
+            message_id: request.reply_to_message_id.unwrap_or(0).saturating_add(1),
+            raw_passthrough: false,
+        }),
+        TelegramRequest::EditUi(request) => TelegramResult::Ui(TelegramUiResult {
+            chat_id: request.chat_id,
+            message_id: request.message_id,
+            template: request.template.clone(),
+            edited: true,
+            raw_passthrough: false,
+        }),
+        TelegramRequest::Delete(request) => TelegramResult::Delete(TelegramDeleteResult {
+            chat_id: request.chat_id,
+            deleted: vec![request.message_id],
+            failed: Vec::new(),
+        }),
+        TelegramRequest::DeleteMany(request) => TelegramResult::Delete(TelegramDeleteResult {
+            chat_id: request.chat_id,
+            deleted: request.message_ids.clone(),
+            failed: Vec::new(),
+        }),
+        TelegramRequest::Restrict(request) => {
+            TelegramResult::Restriction(TelegramRestrictionResult {
+                chat_id: request.chat_id,
+                user_id: request.user_id,
+                until: request.until,
+                permissions: request.permissions.clone(),
+                changed: true,
+            })
+        }
+        TelegramRequest::Unrestrict(request) => {
+            TelegramResult::Restriction(TelegramRestrictionResult {
+                chat_id: request.chat_id,
+                user_id: request.user_id,
+                until: None,
+                permissions: TelegramPermissions::default(),
+                changed: true,
+            })
+        }
+        TelegramRequest::Ban(request) => TelegramResult::Ban(TelegramBanResult {
+            chat_id: request.chat_id,
+            user_id: request.user_id,
+            until: request.until,
+            delete_history: request.delete_history,
+            changed: true,
+        }),
+        TelegramRequest::Unban(request) => TelegramResult::Ban(TelegramBanResult {
+            chat_id: request.chat_id,
+            user_id: request.user_id,
+            until: None,
+            delete_history: false,
+            changed: true,
+        }),
+        TelegramRequest::AnswerCallback(request) => {
+            TelegramResult::Callback(TelegramCallbackResult {
+                callback_query_id: request.callback_query_id.clone(),
+                answered: true,
+                show_alert: request.show_alert,
+                text: request.text.clone(),
+            })
+        }
+    }
+}
+
 impl fmt::Display for TelegramError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.operation.as_str(), self.message)
@@ -528,14 +798,17 @@ impl std::error::Error for TelegramError {}
 mod tests {
     use super::{
         NoopTelegramTransport, ParseMode, TelegramDeleteManyRequest, TelegramErrorKind,
-        TelegramGateway, TelegramMessageResult, TelegramOperation, TelegramRequest, TelegramResult,
-        TelegramTransport, TelegramUiResult,
+        TelegramExecutionOptions, TelegramGateway, TelegramMessageResult, TelegramOperation,
+        TelegramRequest, TelegramResult, TelegramTransport, TelegramUiResult,
     };
     use async_trait::async_trait;
     use serde_json::{json, to_value};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     struct StaticTransport {
         result: TelegramResult,
+        calls: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -548,6 +821,7 @@ mod tests {
             &self,
             _request: TelegramRequest,
         ) -> Result<TelegramResult, super::TelegramError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.result.clone())
         }
     }
@@ -634,6 +908,7 @@ mod tests {
                 edited: false,
                 raw_passthrough: false,
             }),
+            calls: Arc::new(AtomicUsize::new(0)),
         });
 
         let result = gateway
@@ -652,5 +927,110 @@ mod tests {
         assert!(!gateway.polling());
         assert_eq!(gateway.transport_name(), "static");
         assert_eq!(result.message_id(), Some(81));
+    }
+
+    #[tokio::test]
+    async fn execute_checked_rejects_missing_idempotency_for_destructive_ops() {
+        let gateway = TelegramGateway::default();
+
+        let error = gateway
+            .execute_checked(
+                TelegramRequest::DeleteMany(TelegramDeleteManyRequest {
+                    chat_id: -100,
+                    message_ids: vec![10, 11],
+                    idempotency_key: None,
+                }),
+                TelegramExecutionOptions::default(),
+            )
+            .await
+            .expect_err("destructive op without idempotency must fail");
+
+        assert_eq!(error.kind, TelegramErrorKind::Validation);
+        assert_eq!(error.operation, TelegramOperation::DeleteMany);
+    }
+
+    #[tokio::test]
+    async fn execute_checked_dry_run_predicts_without_transport_call() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gateway = TelegramGateway::default().with_transport(StaticTransport {
+            result: TelegramResult::Delete(super::TelegramDeleteResult {
+                chat_id: -100,
+                deleted: vec![77],
+                failed: Vec::new(),
+            }),
+            calls: Arc::clone(&calls),
+        });
+
+        let execution = gateway
+            .execute_checked(
+                TelegramRequest::Delete(super::TelegramDeleteRequest {
+                    chat_id: -100,
+                    message_id: 77,
+                    idempotency_key: Some("delete:-100:77".to_owned()),
+                }),
+                TelegramExecutionOptions { dry_run: true },
+            )
+            .await
+            .expect("dry run must succeed");
+
+        assert!(execution.metadata.dry_run);
+        assert!(!execution.metadata.replayed);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(execution.result.chat_id(), Some(-100));
+    }
+
+    #[tokio::test]
+    async fn execute_checked_replays_cached_idempotent_result() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gateway = TelegramGateway::default().with_transport(StaticTransport {
+            result: TelegramResult::Delete(super::TelegramDeleteResult {
+                chat_id: -100,
+                deleted: vec![77, 78],
+                failed: Vec::new(),
+            }),
+            calls: Arc::clone(&calls),
+        });
+
+        let request = TelegramRequest::DeleteMany(TelegramDeleteManyRequest {
+            chat_id: -100,
+            message_ids: vec![77, 78],
+            idempotency_key: Some("del-window:-100:77-78".to_owned()),
+        });
+
+        let first = gateway
+            .execute_checked(request.clone(), TelegramExecutionOptions::default())
+            .await
+            .expect("first call succeeds");
+        let second = gateway
+            .execute_checked(request, TelegramExecutionOptions::default())
+            .await
+            .expect("second call succeeds");
+
+        assert!(!first.metadata.replayed);
+        assert!(second.metadata.replayed);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(first.result, second.result);
+    }
+
+    #[tokio::test]
+    async fn execute_checked_validates_non_empty_message_text() {
+        let gateway = TelegramGateway::default();
+        let error = gateway
+            .execute_checked(
+                TelegramRequest::SendMessage(super::TelegramSendMessageRequest {
+                    chat_id: -100,
+                    text: "   ".to_owned(),
+                    reply_to_message_id: None,
+                    silent: false,
+                    parse_mode: ParseMode::PlainText,
+                    markup: None,
+                }),
+                TelegramExecutionOptions::default(),
+            )
+            .await
+            .expect_err("empty text must fail");
+
+        assert_eq!(error.kind, TelegramErrorKind::Validation);
+        assert_eq!(error.operation, TelegramOperation::SendMessage);
     }
 }
