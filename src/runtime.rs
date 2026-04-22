@@ -5,7 +5,7 @@ use crate::moderation::ModerationEngine;
 use crate::router::{ExecutionRouter, RouterIndex};
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
-use crate::tg::TelegramGateway;
+use crate::tg::{TelegramGateway, TeloxideCoreTransport};
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -118,7 +118,11 @@ impl RuntimeServices {
             ),
             audit: AuditService::new(true),
             scheduler: Scheduler::new(config.scheduler.tick_interval_ms),
-            telegram: TelegramGateway::new(config.telegram.polling),
+            telegram: match config.telegram.bot_token.as_deref() {
+                Some(token) => TelegramGateway::new(config.telegram.polling)
+                    .with_transport(TeloxideCoreTransport::new(token.to_owned())),
+                None => TelegramGateway::new(config.telegram.polling),
+            },
         })
     }
 }

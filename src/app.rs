@@ -221,6 +221,17 @@ mod tests {
         assert!(!summary.host_api_dry_run);
     }
 
+    #[test]
+    fn bot_token_switches_runtime_transport_to_teloxide_core() {
+        let (_dir, mut config) = app_test_config();
+        config.telegram.bot_token = Some("123456:TEST_TOKEN".to_owned());
+
+        let runtime = Runtime::from_config(&config).expect("runtime builds");
+        let summary = runtime.summary();
+
+        assert_eq!(summary.transport_name, "teloxide-core");
+    }
+
     #[tokio::test]
     async fn application_run_with_immediate_shutdown_reaches_stopped_state() {
         let (_dir, config) = app_test_config();
