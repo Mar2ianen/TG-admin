@@ -7,6 +7,7 @@ pub mod moderation;
 pub mod observability;
 pub mod parser;
 pub mod router;
+pub mod runtime;
 pub mod scheduler;
 pub mod shutdown;
 pub mod storage;
@@ -15,3 +16,4 @@ pub mod unit;
 
 pub use app::Application;
 pub use config::AppConfig;
+pub use runtime::Runtime;

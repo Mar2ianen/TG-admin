@@ -1,12 +1,7 @@
-use crate::audit::AuditService;
 use crate::config::AppConfig;
 use crate::event::EventContext;
-use crate::host_api::HostApi;
-use crate::scheduler::Scheduler;
+use crate::runtime::Runtime;
 use crate::shutdown::{ShutdownController, ShutdownReason};
-use crate::storage::Storage;
-use crate::tg::TelegramGateway;
-use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use tokio::time::{Duration, timeout};
@@ -15,7 +10,7 @@ use tracing::{info, warn};
 pub struct Application {
     config: AppConfig,
     state: ApplicationState,
-    runtime: RuntimeState,
+    runtime: Runtime,
     shutdown: ShutdownController,
 }
 
@@ -26,7 +21,7 @@ impl Application {
 
     fn from_config_with_shutdown(config: AppConfig, shutdown: ShutdownController) -> Result<Self> {
         let startup_event = EventContext::system_event();
-        let runtime = RuntimeState::from_config(&config)?;
+        let runtime = Runtime::from_config(&config)?;
 
         Ok(Self {
             config,
@@ -45,12 +40,11 @@ impl Application {
 
     async fn startup(&mut self) -> Result<()> {
         self.state.mark_starting();
-        let storage_bootstrap = self
+        let startup = self
             .runtime
-            .services
-            .storage
-            .bootstrap()
-            .context("failed to bootstrap storage during startup")?;
+            .startup(&self.config)
+            .await
+            .context("failed to bootstrap runtime during startup")?;
 
         let summary = self.runtime.summary();
         info!(
@@ -58,9 +52,11 @@ impl Application {
             update_type = ?self.state.startup_event.update_type,
             execution_mode = ?self.state.startup_event.execution_mode,
             database_path = %summary.database_path.display(),
-            storage_schema_version = storage_bootstrap.migration().current_version,
+            storage_schema_version = startup.schema_version,
             units_loaded = summary.registry.total_units,
             polling = summary.polling,
+            telegram_transport = summary.transport_name,
+            router_ready = summary.router_ready,
             scheduler_tick_ms = summary.scheduler_tick_ms,
             audit_enabled = summary.audit_enabled,
             host_api_dry_run = summary.host_api_dry_run,
@@ -154,80 +150,11 @@ enum LifecycleState {
     Stopped,
 }
 
-#[derive(Debug)]
-struct RuntimeState {
-    registry: RuntimeRegistry,
-    services: RuntimeServices,
-}
-
-impl RuntimeState {
-    fn from_config(config: &AppConfig) -> Result<Self> {
-        Ok(Self {
-            registry: RuntimeRegistry::default(),
-            services: RuntimeServices::from_config(config)?,
-        })
-    }
-
-    fn summary(&self) -> RuntimeSummary<'_> {
-        RuntimeSummary {
-            database_path: self.services.storage.database_path(),
-            registry: self.registry.units.status_summary(),
-            polling: self.services.telegram.polling(),
-            scheduler_tick_ms: self.services.scheduler.tick_interval_ms(),
-            audit_enabled: self.services.audit.enabled(),
-            host_api_dry_run: self.services.host_api.dry_run(),
-        }
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        self.registry = RuntimeRegistry::default();
-        tokio::task::yield_now().await;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Default)]
-struct RuntimeRegistry {
-    units: UnitRegistry,
-}
-
-#[derive(Debug)]
-struct RuntimeServices {
-    storage: Storage,
-    audit: AuditService,
-    scheduler: Scheduler,
-    telegram: TelegramGateway,
-    host_api: HostApi,
-}
-
-impl RuntimeServices {
-    fn from_config(config: &AppConfig) -> Result<Self> {
-        Ok(Self {
-            storage: Storage::with_config(
-                config.paths.database_path.clone(),
-                config.runtime_storage_config()?,
-            ),
-            audit: AuditService::new(true),
-            scheduler: Scheduler::new(config.scheduler.tick_interval_ms),
-            telegram: TelegramGateway::new(config.telegram.polling),
-            host_api: HostApi::new(false),
-        })
-    }
-}
-
-struct RuntimeSummary<'a> {
-    database_path: &'a std::path::Path,
-    registry: UnitRegistryStatus,
-    polling: bool,
-    scheduler_tick_ms: u64,
-    audit_enabled: bool,
-    host_api_dry_run: bool,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Application, LifecycleState, RuntimeState};
+    use super::{Application, LifecycleState};
     use crate::config::AppConfig;
+    use crate::runtime::Runtime;
     use crate::shutdown::{ShutdownController, ShutdownReason};
     use std::fs;
     use tempfile::TempDir;
@@ -268,6 +195,7 @@ mod tests {
 
         assert_eq!(summary.registry.total_units, 0);
         assert!(summary.polling);
+        assert!(!summary.router_ready);
     }
 
     #[test]
@@ -275,7 +203,7 @@ mod tests {
         let (_dir, mut config) = app_test_config();
         config.observability.metrics_enabled = false;
 
-        let runtime = RuntimeState::from_config(&config).expect("runtime builds");
+        let runtime = Runtime::from_config(&config).expect("runtime builds");
         let summary = runtime.summary();
 
         assert!(summary.audit_enabled);
@@ -286,7 +214,7 @@ mod tests {
         let (_dir, mut config) = app_test_config();
         config.runtime.manual_mode_enabled = true;
 
-        let runtime = RuntimeState::from_config(&config).expect("runtime builds");
+        let runtime = Runtime::from_config(&config).expect("runtime builds");
         let summary = runtime.summary();
 
         assert!(!summary.host_api_dry_run);
@@ -328,6 +256,24 @@ mod tests {
         .expect("application builds");
 
         let error = app.startup().await.expect_err("startup must fail");
-        assert!(error.to_string().contains("failed to bootstrap storage"));
+        assert!(error.to_string().contains("failed to bootstrap runtime"));
+    }
+
+    #[tokio::test]
+    async fn startup_wires_router_and_host_api_into_runtime() {
+        let (_dir, config) = app_test_config();
+        let mut app = Application::from_config_with_shutdown(
+            config,
+            ShutdownController::immediate(),
+        )
+        .expect("application builds");
+
+        app.startup().await.expect("startup succeeds");
+
+        let summary = app.runtime.summary();
+        assert!(summary.router_ready);
+        assert_eq!(summary.transport_name, "noop");
+        assert!(app.runtime.host_api().is_some());
+        assert!(app.runtime.router().is_some());
     }
 }
