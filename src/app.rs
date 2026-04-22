@@ -33,7 +33,7 @@ impl Application {
 
     pub async fn run(&mut self) -> Result<()> {
         self.startup().await?;
-        let reason = self.shutdown.wait().await?;
+        let reason = self.runtime.run_until_shutdown(self.shutdown).await?;
         self.graceful_shutdown(reason).await?;
         Ok(())
     }

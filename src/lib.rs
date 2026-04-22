@@ -3,6 +3,7 @@ pub mod audit;
 pub mod config;
 pub mod event;
 pub mod host_api;
+pub mod ingress;
 pub mod moderation;
 pub mod observability;
 pub mod parser;

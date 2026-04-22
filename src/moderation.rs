@@ -36,6 +36,7 @@ pub struct ModerationEngine {
     dispatcher: EventCommandDispatcher,
     gateway: TelegramGateway,
     admin_user_ids: Vec<i64>,
+    processed_update_guard: bool,
 }
 
 impl ModerationEngine {
@@ -47,6 +48,7 @@ impl ModerationEngine {
             dispatcher: EventCommandDispatcher::new(),
             gateway,
             admin_user_ids: Vec::new(),
+            processed_update_guard: true,
         }
     }
 
@@ -80,6 +82,11 @@ impl ModerationEngine {
         I: IntoIterator<Item = i64>,
     {
         self.admin_user_ids = admin_user_ids.into_iter().collect();
+        self
+    }
+
+    pub fn without_processed_update_guard(mut self) -> Self {
+        self.processed_update_guard = false;
         self
     }
 
@@ -119,7 +126,7 @@ impl ModerationEngine {
         &self,
         event: &EventContext,
     ) -> Result<Option<ProcessedUpdateRecord>, ModerationError> {
-        if self.dry_run {
+        if self.dry_run || !self.processed_update_guard {
             return Ok(None);
         }
 
@@ -142,7 +149,7 @@ impl ModerationEngine {
     }
 
     fn mark_processed_update(&self, event: &EventContext) -> Result<(), ModerationError> {
-        if self.dry_run {
+        if self.dry_run || !self.processed_update_guard {
             return Ok(());
         }
 

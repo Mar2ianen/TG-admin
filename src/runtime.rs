@@ -1,14 +1,17 @@
 use crate::audit::AuditService;
 use crate::config::AppConfig;
 use crate::host_api::HostApi;
+use crate::ingress::IngressPipeline;
 use crate::moderation::ModerationEngine;
 use crate::router::{ExecutionRouter, RouterIndex};
 use crate::scheduler::Scheduler;
+use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::Storage;
 use crate::tg::{TelegramGateway, TeloxideCoreTransport};
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub struct Runtime {
@@ -40,6 +43,11 @@ impl Runtime {
             .storage
             .init()
             .context("failed to open host api storage during runtime startup")?;
+        let ingress_storage = self
+            .services
+            .storage
+            .init()
+            .context("failed to open ingress storage during runtime startup")?;
 
         let registry_handle = std::rc::Rc::new(self.registry.clone());
         let host_api = HostApi::new(false)
@@ -47,14 +55,22 @@ impl Runtime {
             .with_unit_registry_handle(registry_handle.clone());
         let moderation = ModerationEngine::new(moderation_storage, self.services.telegram.clone())
             .with_unit_registry_handle(registry_handle)
-            .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied());
-        let router = ExecutionRouter::new()
-            .with_index(RouterIndex::from_registry(&self.registry))
-            .with_moderation(moderation);
+            .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
+            .without_processed_update_guard();
+        let router = Rc::new(
+            ExecutionRouter::new()
+                .with_index(RouterIndex::from_registry(&self.registry))
+                .with_moderation(moderation),
+        );
+        let ingress = self
+            .services
+            .polling_bot()
+            .map(|bot| IngressPipeline::new(bot, ingress_storage, router.clone()));
 
         self.execution = RuntimeExecution {
             host_api: Some(host_api),
             router: Some(router),
+            ingress,
         };
 
         Ok(RuntimeBootstrapInfo { schema_version })
@@ -65,7 +81,7 @@ impl Runtime {
             .execution
             .router
             .as_ref()
-            .map(ExecutionRouter::index_stats)
+            .map(|router| router.index_stats())
             .unwrap_or_default();
         RuntimeSummary {
             database_path: self.services.storage.database_path(),
@@ -92,12 +108,19 @@ impl Runtime {
         Ok(())
     }
 
+    pub async fn run_until_shutdown(&self, shutdown: ShutdownController) -> Result<ShutdownReason> {
+        match self.execution.ingress.as_ref() {
+            Some(ingress) => ingress.run_until_shutdown(shutdown).await,
+            None => shutdown.wait().await,
+        }
+    }
+
     pub fn host_api(&self) -> Option<&HostApi> {
         self.execution.host_api.as_ref()
     }
 
     pub fn router(&self) -> Option<&ExecutionRouter> {
-        self.execution.router.as_ref()
+        self.execution.router.as_deref()
     }
 }
 
@@ -107,6 +130,7 @@ struct RuntimeServices {
     audit: AuditService,
     scheduler: Scheduler,
     telegram: TelegramGateway,
+    polling_bot: Option<teloxide_core::Bot>,
 }
 
 impl RuntimeServices {
@@ -123,14 +147,23 @@ impl RuntimeServices {
                     .with_transport(TeloxideCoreTransport::new(token.to_owned())),
                 None => TelegramGateway::new(config.telegram.polling),
             },
+            polling_bot: match (config.telegram.polling, config.telegram.bot_token.as_deref()) {
+                (true, Some(token)) => Some(teloxide_core::Bot::new(token.to_owned())),
+                _ => None,
+            },
         })
+    }
+
+    fn polling_bot(&self) -> Option<teloxide_core::Bot> {
+        self.polling_bot.clone()
     }
 }
 
 #[derive(Debug, Default)]
 struct RuntimeExecution {
     host_api: Option<HostApi>,
-    router: Option<ExecutionRouter>,
+    router: Option<Rc<ExecutionRouter>>,
+    ingress: Option<IngressPipeline>,
 }
 
 #[derive(Debug, Clone, Copy)]
