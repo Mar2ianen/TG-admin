@@ -535,12 +535,44 @@ impl HostApi {
                 )
             })?;
 
-        if !original.reversible || original.compensation_json.is_none() {
-            return Ok(self.response(
+        if !original.reversible {
+            return Err(HostApiError::validation(
                 HostApiOperation::AuditCompensate,
-                AuditCompensateValue {
-                    compensated: false,
-                    new_action_id: None,
+                HostApiErrorDetail::InvalidField {
+                    field: "action_id".to_owned(),
+                    message: format!("audit action `{}` is not reversible", request.action_id),
+                },
+            ));
+        }
+        let compensation_recipe = original.compensation_json.as_deref().ok_or_else(|| {
+            HostApiError::validation(
+                HostApiOperation::AuditCompensate,
+                HostApiErrorDetail::InvalidField {
+                    field: "action_id".to_owned(),
+                    message: format!("audit action `{}` has no compensation recipe", request.action_id),
+                },
+            )
+        })?;
+        serde_json::from_str::<Value>(compensation_recipe).map_err(|source| {
+            HostApiError::validation(
+                HostApiOperation::AuditCompensate,
+                HostApiErrorDetail::InvalidField {
+                    field: "compensation_json".to_owned(),
+                    message: format!("invalid compensation recipe: {source}"),
+                },
+            )
+        })?;
+
+        let compensation_idempotency_key = format!("compensate:{}", original.action_id);
+        let existing_compensations = storage
+            .find_audit_by_idempotency_key(&compensation_idempotency_key)
+            .map_err(|source| storage_error(HostApiOperation::AuditCompensate, source))?;
+        if !existing_compensations.is_empty() {
+            return Err(HostApiError::validation(
+                HostApiOperation::AuditCompensate,
+                HostApiErrorDetail::InvalidField {
+                    field: "action_id".to_owned(),
+                    message: format!("audit action `{}` is already compensated", request.action_id),
                 },
             ));
         }
@@ -571,12 +603,12 @@ impl HostApi {
             target_kind: Some("audit_action".to_owned()),
             target_id: Some(original.action_id.clone()),
             trigger_message_id: event.message.as_ref().map(|message| i64::from(message.id)),
-            idempotency_key: Some(format!("compensate:{}", original.action_id)),
+            idempotency_key: Some(compensation_idempotency_key),
             reversible: false,
             compensation_json: None,
             args_json: json!({
                 "action_id": original.action_id,
-                "recipe": original.compensation_json,
+                "recipe": compensation_recipe,
             })
             .to_string(),
             result_json: Some(json!({ "compensated": true }).to_string()),
@@ -647,10 +679,21 @@ impl HostApi {
         capability: &'static str,
     ) -> Result<(), HostApiError> {
         let Some(unit) = event.system.unit.as_ref() else {
-            return Ok(());
+            return Err(HostApiError::denied(
+                operation,
+                HostApiErrorDetail::CapabilityDenied {
+                    capability: capability.to_owned(),
+                    unit_id: "<unknown>".to_owned(),
+                },
+            ));
         };
         let Some(registry) = self.unit_registry.as_deref() else {
-            return Ok(());
+            return Err(HostApiError::internal(
+                operation,
+                HostApiErrorDetail::ResourceUnavailable {
+                    resource: "unit_registry".to_owned(),
+                },
+            ));
         };
         let descriptor = registry.get(&unit.id).ok_or_else(|| {
             HostApiError::validation(
@@ -2387,6 +2430,34 @@ mod tests {
     }
 
     #[test]
+    fn msg_window_fails_closed_when_unit_registry_is_unavailable() {
+        let event = manual_event();
+        let (_dir, api) = storage_api();
+
+        let error = api
+            .msg_window(
+                &event,
+                MsgWindowRequest {
+                    chat_id: -100123,
+                    anchor_message_id: 81231,
+                    up: 1,
+                    down: 1,
+                    include_anchor: true,
+                },
+            )
+            .expect_err("missing registry must fail closed");
+
+        assert_eq!(error.kind, HostApiErrorKind::Internal);
+        assert_eq!(error.operation, HostApiOperation::MsgWindow);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::ResourceUnavailable {
+                resource: "unit_registry".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn msg_window_preserves_dry_run_metadata_for_reads() {
         let event = manual_event();
         let (_dir, api) = storage_api_with_registry(&["msg.history.read"], &[], true);
@@ -2783,6 +2854,129 @@ mod tests {
                 .expect("lookup succeeds")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn audit_compensate_rejects_already_compensated_action() {
+        let event = manual_event();
+        let (_dir, api) =
+            storage_api_with_registry(&["audit.compensate", "audit.read"], &[], false);
+        seed_audit_entries(&api);
+
+        let first = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "act_1".to_owned(),
+                },
+            )
+            .expect("first compensation succeeds");
+        assert!(first.value.compensated);
+
+        let error = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "act_1".to_owned(),
+                },
+            )
+            .expect_err("second compensation must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::InvalidField {
+                field: "action_id".to_owned(),
+                message: "audit action `act_1` is already compensated".to_owned(),
+            }
+        );
+
+        let compensations = api
+            .storage(HostApiOperation::AuditCompensate)
+            .expect("storage")
+            .find_audit_by_idempotency_key("compensate:act_1")
+            .expect("lookup succeeds");
+        assert_eq!(compensations.len(), 1);
+    }
+
+    #[test]
+    fn audit_compensate_rejects_non_reversible_action() {
+        let event = manual_event();
+        let (_dir, api) =
+            storage_api_with_registry(&["audit.compensate", "audit.read"], &[], false);
+        seed_audit_entries(&api);
+
+        let error = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "act_2".to_owned(),
+                },
+            )
+            .expect_err("non-reversible action must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::InvalidField {
+                field: "action_id".to_owned(),
+                message: "audit action `act_2` is not reversible".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn audit_compensate_rejects_invalid_compensation_recipe() {
+        let event = manual_event();
+        let (_dir, api) =
+            storage_api_with_registry(&["audit.compensate", "audit.read"], &[], false);
+        seed_audit_entries(&api);
+        api.storage(HostApiOperation::AuditCompensate)
+            .expect("storage")
+            .append_audit_entry(&AuditLogEntry {
+                action_id: "act_invalid_recipe".to_owned(),
+                trace_id: Some("trace-invalid".to_owned()),
+                request_id: None,
+                unit_name: "moderation.test".to_owned(),
+                execution_mode: "manual".to_owned(),
+                op: "mute".to_owned(),
+                actor_user_id: Some(42),
+                chat_id: Some(-100123),
+                target_kind: Some("user".to_owned()),
+                target_id: Some("99887766".to_owned()),
+                trigger_message_id: Some(81231),
+                idempotency_key: Some("idem-invalid".to_owned()),
+                reversible: true,
+                compensation_json: Some("{not-json}".to_owned()),
+                args_json: "{\"duration\":\"7d\"}".to_owned(),
+                result_json: Some("{\"ok\":true}".to_owned()),
+                created_at: "2026-04-21T12:02:00Z".to_owned(),
+            })
+            .expect("invalid recipe audit entry");
+
+        let error = api
+            .audit_compensate(
+                &event,
+                AuditCompensateRequest {
+                    action_id: "act_invalid_recipe".to_owned(),
+                },
+            )
+            .expect_err("invalid recipe must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Validation);
+        assert!(matches!(
+            error.detail,
+            HostApiErrorDetail::InvalidField { ref field, ref message }
+                if field == "compensation_json"
+                    && message.contains("invalid compensation recipe")
+        ));
+
+        let compensations = api
+            .storage(HostApiOperation::AuditCompensate)
+            .expect("storage")
+            .find_audit_by_idempotency_key("compensate:act_invalid_recipe")
+            .expect("lookup succeeds");
+        assert!(compensations.is_empty());
     }
 
     #[test]

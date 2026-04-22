@@ -102,6 +102,31 @@ impl EventContext {
             .map(CommandSource::CallbackData)
     }
 
+    pub fn author_source_class(&self) -> AuthorSourceClass {
+        match self.sender.as_ref() {
+            Some(sender) if sender.is_bot => AuthorSourceClass::Bot,
+            Some(sender) if sender.is_admin => AuthorSourceClass::HumanAdmin,
+            Some(_) => AuthorSourceClass::HumanMember,
+            None if self.is_linked_channel_style_approx() => AuthorSourceClass::ChannelStyleNoSender,
+            None => AuthorSourceClass::Unknown,
+        }
+    }
+
+    pub fn is_linked_channel_style_approx(&self) -> bool {
+        matches!(
+            self.update_type,
+            UpdateType::ChannelPost | UpdateType::EditedChannelPost
+        ) || (matches!(
+            self.update_type,
+            UpdateType::Message | UpdateType::EditedMessage
+        ) && self.sender.is_none()
+            && self.message.is_some()
+            && self
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.route_class() == ChatRouteClass::GroupLike))
+    }
+
     pub fn validate_invariants(&self) -> Result<()> {
         if self.event_id.trim().is_empty() {
             bail!("event_id must not be empty");
@@ -176,6 +201,25 @@ pub enum CommandSource<'a> {
     CallbackData(&'a str),
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRouteClass {
+    Private,
+    GroupLike,
+    Channel,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorSourceClass {
+    HumanAdmin,
+    HumanMember,
+    Bot,
+    ChannelStyleNoSender,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct EventNormalizer;
 
@@ -196,6 +240,9 @@ impl EventNormalizer {
     ) -> Result<EventContext, EventNormalizationError> {
         if input.command_text.trim().is_empty() {
             return Err(EventNormalizationError::MissingCommandText);
+        }
+        if input.chat.is_none() {
+            return Err(EventNormalizationError::MissingManualChat);
         }
 
         let mut event = EventContext::new(
@@ -225,6 +272,12 @@ impl EventNormalizer {
     ) -> Result<EventContext, EventNormalizationError> {
         if input.job_id.trim().is_empty() {
             return Err(EventNormalizationError::MissingJobId);
+        }
+        if input.reply.is_some() && input.command_text.is_none() {
+            return Err(EventNormalizationError::ScheduledReplyRequiresCommandText);
+        }
+        if input.command_text.is_some() && input.chat.is_none() {
+            return Err(EventNormalizationError::ScheduledCommandRequiresChat);
         }
 
         let mut event = EventContext::new(
@@ -417,8 +470,14 @@ pub enum EventNormalizationError {
     EmptyEventId,
     #[error("manual invocation requires non-empty command text")]
     MissingCommandText,
+    #[error("manual invocation requires chat context for synthetic command events")]
+    MissingManualChat,
     #[error("scheduled invocation requires non-empty job_id")]
     MissingJobId,
+    #[error("scheduled invocation reply context requires command_text")]
+    ScheduledReplyRequiresCommandText,
+    #[error("scheduled invocation command_text requires chat context")]
+    ScheduledCommandRequiresChat,
     #[error("telegram update missing required message context")]
     MissingTelegramMessage,
     #[error("telegram callback update missing required callback context")]
@@ -463,6 +522,17 @@ pub struct ChatContext {
     pub title: Option<String>,
     pub username: Option<String>,
     pub thread_id: Option<i64>,
+}
+
+impl ChatContext {
+    pub fn route_class(&self) -> ChatRouteClass {
+        match self.chat_type.as_str() {
+            "private" => ChatRouteClass::Private,
+            "group" | "supergroup" => ChatRouteClass::GroupLike,
+            "channel" => ChatRouteClass::Channel,
+            _ => ChatRouteClass::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -689,8 +759,9 @@ fn validate_telegram_shape(input: &TelegramUpdateInput) -> Result<(), EventNorma
 mod tests {
     use super::{
         CallbackContext, ChatContext, CommandSource, EventContext, EventNormalizationError,
-        EventNormalizer, ExecutionMode, ManualInvocationInput, MessageContext, ScheduledJobInput,
-        SenderContext, SystemContext, SystemOrigin, TelegramUpdateInput, UnitContext, UpdateType,
+        EventNormalizer, ExecutionMode, ManualInvocationInput, MessageContext, ReplyContext,
+        ScheduledJobInput, SenderContext, SystemContext, SystemOrigin, TelegramUpdateInput,
+        UnitContext, UpdateType,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
@@ -932,6 +1003,95 @@ mod tests {
         event
             .validate_invariants()
             .expect("scheduled event must stay valid");
+    }
+
+    #[test]
+    fn manual_normalization_rejects_missing_chat() {
+        let normalizer = EventNormalizer::new();
+        let input = ManualInvocationInput::new(UnitContext::new("moderation.warn"), "/warn @spam");
+
+        let error = normalizer
+            .normalize_manual(input)
+            .expect_err("manual normalization must reject missing chat");
+        assert!(matches!(error, EventNormalizationError::MissingManualChat));
+    }
+
+    #[test]
+    fn scheduled_normalization_rejects_reply_without_command_text() {
+        let normalizer = EventNormalizer::new();
+        let mut input = ScheduledJobInput::new(
+            "job_123",
+            UnitContext::new("moderation.mute").with_trigger("schedule"),
+            json!({ "kind": "mute_recheck" }),
+            ts(),
+            ts(),
+        );
+        input.reply = Some(ReplyContext {
+            message_id: 777,
+            sender_user_id: Some(42),
+            sender_username: Some("admin".to_owned()),
+            text: Some("anchor".to_owned()),
+            has_media: false,
+        });
+
+        let error = normalizer
+            .normalize_scheduled(input)
+            .expect_err("scheduled normalization must reject reply without command");
+        assert!(matches!(
+            error,
+            EventNormalizationError::ScheduledReplyRequiresCommandText
+        ));
+    }
+
+    #[test]
+    fn scheduled_normalization_rejects_command_text_without_chat() {
+        let normalizer = EventNormalizer::new();
+        let mut input = ScheduledJobInput::new(
+            "job_123",
+            UnitContext::new("moderation.mute").with_trigger("schedule"),
+            json!({ "kind": "mute_recheck" }),
+            ts(),
+            ts(),
+        );
+        input.command_text = Some("/mute @spam 1h".to_owned());
+
+        let error = normalizer
+            .normalize_scheduled(input)
+            .expect_err("scheduled normalization must reject missing chat");
+        assert!(matches!(
+            error,
+            EventNormalizationError::ScheduledCommandRequiresChat
+        ));
+    }
+
+    #[test]
+    fn scheduled_normalization_with_reply_and_command_text_copies_reply_to_message_id() {
+        let normalizer = EventNormalizer::new();
+        let mut input = ScheduledJobInput::new(
+            "job_123",
+            UnitContext::new("moderation.mute").with_trigger("schedule"),
+            json!({ "kind": "mute_recheck" }),
+            ts(),
+            ts(),
+        );
+        input.chat = Some(chat());
+        input.reply = Some(ReplyContext {
+            message_id: 777,
+            sender_user_id: Some(42),
+            sender_username: Some("admin".to_owned()),
+            text: Some("anchor".to_owned()),
+            has_media: false,
+        });
+        input.command_text = Some("/mute @spam 1h".to_owned());
+
+        let event = normalizer
+            .normalize_scheduled(input)
+            .expect("scheduled normalization must succeed");
+
+        assert_eq!(
+            event.message.as_ref().and_then(|message| message.reply_to_message_id),
+            Some(777)
+        );
     }
 
     #[test]

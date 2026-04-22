@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use crate::storage::{
+    JournalMode, StorageConfig as RuntimeStorageConfig, SynchronousMode, TempStoreMode,
+};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
@@ -20,11 +23,10 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        let path = env::var_os("TMO_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("config.toml"));
-
-        Self::load_from_path(&path)
+        match env::var_os("TMO_CONFIG") {
+            Some(path) => Self::load_required_from_path(Path::new(&path)),
+            None => Self::load_from_path(Path::new("config.toml")),
+        }
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
@@ -37,6 +39,44 @@ impl AppConfig {
 
         toml::from_str(&raw)
             .with_context(|| format!("failed to parse config from {}", path.display()))
+    }
+
+    pub fn load_required_from_path(path: &Path) -> Result<Self> {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read config from {}", path.display()))?;
+
+        toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config from {}", path.display()))
+    }
+
+    pub fn runtime_storage_config(&self) -> Result<RuntimeStorageConfig> {
+        let journal_mode = parse_journal_mode(&self.storage.sqlite_journal_mode)?;
+        let synchronous = parse_synchronous_mode(&self.storage.sqlite_synchronous)?;
+
+        Ok(RuntimeStorageConfig {
+            busy_timeout: std::time::Duration::from_millis(self.storage.sqlite_busy_timeout_ms),
+            journal_mode,
+            synchronous,
+            temp_store: TempStoreMode::Memory,
+            foreign_keys: true,
+        })
+    }
+}
+
+fn parse_journal_mode(raw: &str) -> Result<JournalMode> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "DELETE" => Ok(JournalMode::Delete),
+        "WAL" => Ok(JournalMode::Wal),
+        other => anyhow::bail!("unsupported sqlite_journal_mode `{other}`"),
+    }
+}
+
+fn parse_synchronous_mode(raw: &str) -> Result<SynchronousMode> {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "OFF" => Ok(SynchronousMode::Off),
+        "NORMAL" => Ok(SynchronousMode::Normal),
+        "FULL" => Ok(SynchronousMode::Full),
+        other => anyhow::bail!("unsupported sqlite_synchronous `{other}`"),
     }
 }
 
@@ -391,5 +431,36 @@ log_level = "warn"
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn explicit_config_path_missing_returns_error() {
+        let base = std::env::temp_dir().join(format!(
+            "telegram-moderation-os-missing-explicit-config-{}",
+            std::process::id()
+        ));
+        let path = base.join("missing-config.toml");
+
+        let error = AppConfig::load_required_from_path(&path).expect_err("missing file must fail");
+        assert!(error.to_string().contains("failed to read config"));
+    }
+
+    #[test]
+    fn runtime_storage_config_rejects_invalid_modes() {
+        let mut config = AppConfig::default();
+        config.storage.sqlite_journal_mode = "bogus".to_owned();
+
+        let error = config
+            .runtime_storage_config()
+            .expect_err("invalid journal mode must fail");
+        assert!(error.to_string().contains("sqlite_journal_mode"));
+
+        config.storage.sqlite_journal_mode = "WAL".to_owned();
+        config.storage.sqlite_synchronous = "bogus".to_owned();
+
+        let error = config
+            .runtime_storage_config()
+            .expect_err("invalid synchronous mode must fail");
+        assert!(error.to_string().contains("sqlite_synchronous"));
     }
 }

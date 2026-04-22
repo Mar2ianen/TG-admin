@@ -2,11 +2,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const PROCESSED_UPDATE_STATUS_PENDING: &str = "pending";
+pub const PROCESSED_UPDATE_STATUS_COMPLETED: &str = "completed";
 const MIGRATION_V1_SQL: &str = "
 CREATE TABLE IF NOT EXISTS schema_bootstrap (
   key TEXT PRIMARY KEY,
@@ -107,6 +109,12 @@ CREATE TABLE IF NOT EXISTS processed_updates (
 );
 
 PRAGMA user_version = 1;
+";
+const MIGRATION_V2_SQL: &str = "
+ALTER TABLE processed_updates
+ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';
+
+PRAGMA user_version = 2;
 ";
 
 #[derive(Debug, Clone)]
@@ -302,6 +310,7 @@ pub struct ProcessedUpdateRecord {
     pub event_id: String,
     pub processed_at: String,
     pub execution_mode: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,6 +434,10 @@ impl StorageConnection {
             self.apply_migration_v1()?;
             applied_versions.push(1);
         }
+        if current_version < 2 {
+            self.apply_migration_v2()?;
+            applied_versions.push(2);
+        }
 
         let final_version = self.current_schema_version()?;
 
@@ -461,6 +474,17 @@ impl StorageConnection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         tx.execute_batch(MIGRATION_V1_SQL)?;
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    fn apply_migration_v2(&mut self) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        tx.execute_batch(MIGRATION_V2_SQL)?;
         tx.commit()?;
 
         Ok(())
@@ -569,7 +593,7 @@ impl StorageConnection {
         update_id: i64,
     ) -> Result<Option<ProcessedUpdateRecord>, StorageError> {
         let mut statement = self.connection.prepare(
-            "SELECT update_id, event_id, processed_at, execution_mode
+            "SELECT update_id, event_id, processed_at, execution_mode, status
              FROM processed_updates
              WHERE update_id = ?1",
         )?;
@@ -583,20 +607,44 @@ impl StorageConnection {
     pub fn mark_processed_update(
         &self,
         record: &ProcessedUpdateRecord,
-    ) -> Result<bool, StorageError> {
+    ) -> Result<Option<ProcessedUpdateRecord>, StorageError> {
+        validate_processed_update_status(&record.status)?;
+
         let inserted = self.connection.execute(
             "INSERT OR IGNORE INTO processed_updates
-                 (update_id, event_id, processed_at, execution_mode)
-             VALUES (?1, ?2, ?3, ?4)",
+                 (update_id, event_id, processed_at, execution_mode, status)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 record.update_id,
                 record.event_id,
                 record.processed_at,
                 record.execution_mode,
+                record.status,
             ],
         )?;
 
-        Ok(inserted > 0)
+        if inserted > 0 {
+            Ok(None)
+        } else {
+            self.get_processed_update(record.update_id)
+        }
+    }
+
+    pub fn complete_processed_update(
+        &self,
+        update_id: i64,
+        processed_at: &str,
+    ) -> Result<bool, StorageError> {
+        let updated = self.connection.execute(
+            "UPDATE processed_updates
+             SET status = ?2,
+                 processed_at = ?3
+             WHERE update_id = ?1
+               AND status <> ?2",
+            params![update_id, PROCESSED_UPDATE_STATUS_COMPLETED, processed_at,],
+        )?;
+
+        Ok(updated > 0)
     }
 
     pub fn append_message_journal(
@@ -911,6 +959,8 @@ pub enum StorageError {
     Sqlite(#[from] rusqlite::Error),
     #[error("unsupported schema version {found}; supported up to {supported}")]
     UnsupportedSchemaVersion { found: u32, supported: u32 },
+    #[error("invalid processed update status `{status}`")]
+    InvalidProcessedUpdateStatus { status: String },
     #[error("expected persisted row in `{0}` after write")]
     MissingRow(&'static str),
 }
@@ -939,6 +989,15 @@ fn bool_to_sqlite(value: bool) -> i64 {
 
 fn sqlite_to_bool(value: i64) -> bool {
     value != 0
+}
+
+fn validate_processed_update_status(status: &str) -> Result<(), StorageError> {
+    match status {
+        PROCESSED_UPDATE_STATUS_PENDING | PROCESSED_UPDATE_STATUS_COMPLETED => Ok(()),
+        _ => Err(StorageError::InvalidProcessedUpdateStatus {
+            status: status.to_owned(),
+        }),
+    }
 }
 
 fn map_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
@@ -972,6 +1031,7 @@ fn map_processed_update_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Process
         event_id: row.get(1)?,
         processed_at: row.get(2)?,
         execution_mode: row.get(3)?,
+        status: row.get(4)?,
     })
 }
 
@@ -1035,8 +1095,9 @@ fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditLogEntry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditLogEntry, CURRENT_SCHEMA_VERSION, JobRecord, JournalMode, KvEntry,
-        ProcessedUpdateRecord, Storage, StorageConfig, SynchronousMode, TempStoreMode, UserPatch,
+        AuditLogEntry, JobRecord, JournalMode, KvEntry, ProcessedUpdateRecord, Storage,
+        StorageConfig, SynchronousMode, TempStoreMode, UserPatch, CURRENT_SCHEMA_VERSION,
+        MIGRATION_V1_SQL, PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
     };
     use std::collections::BTreeSet;
 
@@ -1100,7 +1161,7 @@ mod tests {
             bootstrap.migration().current_version,
             CURRENT_SCHEMA_VERSION
         );
-        assert_eq!(bootstrap.migration().applied_versions, vec![1]);
+        assert_eq!(bootstrap.migration().applied_versions, vec![1, 2]);
         assert!(bootstrap.migration().changed());
 
         let row_count: u32 = bootstrap
@@ -1275,7 +1336,13 @@ mod tests {
         );
         assert_eq!(
             table_column_names(connection, "processed_updates"),
-            vec!["update_id", "event_id", "processed_at", "execution_mode"]
+            vec![
+                "update_id",
+                "event_id",
+                "processed_at",
+                "execution_mode",
+                "status",
+            ]
         );
     }
 
@@ -1367,12 +1434,14 @@ mod tests {
             event_id: String::from("evt-404"),
             processed_at: String::from("2026-04-21T14:00:00Z"),
             execution_mode: String::from("telegram"),
+            status: String::from(PROCESSED_UPDATE_STATUS_COMPLETED),
         };
         let second = ProcessedUpdateRecord {
             update_id: 404,
             event_id: String::from("evt-replayed"),
             processed_at: String::from("2026-04-21T14:01:00Z"),
             execution_mode: String::from("replay"),
+            status: String::from(PROCESSED_UPDATE_STATUS_COMPLETED),
         };
 
         let inserted_first = storage
@@ -1385,9 +1454,87 @@ mod tests {
             .get_processed_update(first.update_id)
             .unwrap_or_else(|error| panic!("failed to load processed update: {error}"));
 
-        assert!(inserted_first);
-        assert!(!inserted_second);
+        assert!(inserted_first.is_none());
+        assert_eq!(inserted_second, Some(first.clone()));
         assert_eq!(loaded, Some(first));
+    }
+
+    #[test]
+    fn processed_updates_support_pending_to_completed_transition() {
+        let storage = bootstrapped_storage();
+        let pending = ProcessedUpdateRecord {
+            update_id: 405,
+            event_id: String::from("evt-405"),
+            processed_at: String::from("2026-04-21T14:05:00Z"),
+            execution_mode: String::from("telegram"),
+            status: String::from(PROCESSED_UPDATE_STATUS_PENDING),
+        };
+
+        let inserted = storage
+            .mark_processed_update(&pending)
+            .unwrap_or_else(|error| panic!("failed to insert pending processed update: {error}"));
+        let completed = storage
+            .complete_processed_update(405, "2026-04-21T14:05:30Z")
+            .unwrap_or_else(|error| panic!("failed to complete processed update: {error}"));
+        let loaded = storage
+            .get_processed_update(405)
+            .unwrap_or_else(|error| panic!("failed to load completed processed update: {error}"));
+
+        assert!(inserted.is_none());
+        assert!(completed);
+        assert_eq!(
+            loaded,
+            Some(ProcessedUpdateRecord {
+                update_id: 405,
+                event_id: String::from("evt-405"),
+                processed_at: String::from("2026-04-21T14:05:30Z"),
+                execution_mode: String::from("telegram"),
+                status: String::from(PROCESSED_UPDATE_STATUS_COMPLETED),
+            })
+        );
+    }
+
+    #[test]
+    fn migration_v2_backfills_processed_update_status_for_existing_rows() {
+        let dir = tempdir().unwrap_or_else(|error| panic!("failed to create tempdir: {error}"));
+        let database_path = dir.path().join("runtime.sqlite3");
+
+        let connection = rusqlite::Connection::open(&database_path)
+            .unwrap_or_else(|error| panic!("failed to create sqlite database: {error}"));
+        connection
+            .execute_batch(MIGRATION_V1_SQL)
+            .unwrap_or_else(|error| panic!("failed to apply v1 schema: {error}"));
+        connection
+            .execute(
+                "INSERT INTO processed_updates (update_id, event_id, processed_at, execution_mode)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![777_i64, "evt-777", "2026-04-21T18:00:00Z", "telegram"],
+            )
+            .unwrap_or_else(|error| panic!("failed to seed v1 processed update row: {error}"));
+        drop(connection);
+
+        let storage = Storage::new(database_path);
+        let migrated = storage
+            .bootstrap()
+            .unwrap_or_else(|error| panic!("failed to migrate storage: {error}"));
+        let loaded = migrated
+            .connection()
+            .get_processed_update(777)
+            .unwrap_or_else(|error| panic!("failed to load migrated processed update: {error}"));
+
+        assert_eq!(migrated.migration().previous_version, 1);
+        assert_eq!(migrated.migration().current_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(migrated.migration().applied_versions, vec![2]);
+        assert_eq!(
+            loaded,
+            Some(ProcessedUpdateRecord {
+                update_id: 777,
+                event_id: String::from("evt-777"),
+                processed_at: String::from("2026-04-21T18:00:00Z"),
+                execution_mode: String::from("telegram"),
+                status: String::from(PROCESSED_UPDATE_STATUS_COMPLETED),
+            })
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::Storage;
 use crate::tg::TelegramGateway;
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
@@ -20,20 +20,20 @@ pub struct Application {
 }
 
 impl Application {
-    pub fn from_config(config: AppConfig) -> Self {
+    pub fn from_config(config: AppConfig) -> Result<Self> {
         Self::from_config_with_shutdown(config, ShutdownController::os_signals())
     }
 
-    fn from_config_with_shutdown(config: AppConfig, shutdown: ShutdownController) -> Self {
+    fn from_config_with_shutdown(config: AppConfig, shutdown: ShutdownController) -> Result<Self> {
         let startup_event = EventContext::system_event();
-        let runtime = RuntimeState::from_config(&config);
+        let runtime = RuntimeState::from_config(&config)?;
 
-        Self {
+        Ok(Self {
             config,
             state: ApplicationState::new(startup_event),
             runtime,
             shutdown,
-        }
+        })
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -45,6 +45,12 @@ impl Application {
 
     async fn startup(&mut self) -> Result<()> {
         self.state.mark_starting();
+        let storage_bootstrap = self
+            .runtime
+            .services
+            .storage
+            .bootstrap()
+            .context("failed to bootstrap storage during startup")?;
 
         let summary = self.runtime.summary();
         info!(
@@ -52,6 +58,7 @@ impl Application {
             update_type = ?self.state.startup_event.update_type,
             execution_mode = ?self.state.startup_event.execution_mode,
             database_path = %summary.database_path.display(),
+            storage_schema_version = storage_bootstrap.migration().current_version,
             units_loaded = summary.registry.total_units,
             polling = summary.polling,
             scheduler_tick_ms = summary.scheduler_tick_ms,
@@ -154,11 +161,11 @@ struct RuntimeState {
 }
 
 impl RuntimeState {
-    fn from_config(config: &AppConfig) -> Self {
-        Self {
+    fn from_config(config: &AppConfig) -> Result<Self> {
+        Ok(Self {
             registry: RuntimeRegistry::default(),
-            services: RuntimeServices::from_config(config),
-        }
+            services: RuntimeServices::from_config(config)?,
+        })
     }
 
     fn summary(&self) -> RuntimeSummary<'_> {
@@ -194,14 +201,17 @@ struct RuntimeServices {
 }
 
 impl RuntimeServices {
-    fn from_config(config: &AppConfig) -> Self {
-        Self {
-            storage: Storage::new(config.paths.database_path.clone()),
+    fn from_config(config: &AppConfig) -> Result<Self> {
+        Ok(Self {
+            storage: Storage::with_config(
+                config.paths.database_path.clone(),
+                config.runtime_storage_config()?,
+            ),
             audit: AuditService::new(true),
             scheduler: Scheduler::new(config.scheduler.tick_interval_ms),
             telegram: TelegramGateway::new(config.telegram.polling),
             host_api: HostApi::new(false),
-        }
+        })
     }
 }
 
@@ -219,13 +229,24 @@ mod tests {
     use super::{Application, LifecycleState, RuntimeState};
     use crate::config::AppConfig;
     use crate::shutdown::{ShutdownController, ShutdownReason};
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn app_test_config() -> (TempDir, AppConfig) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.paths.database_path = dir.path().join("runtime.sqlite3");
+        (dir, config)
+    }
 
     #[tokio::test]
     async fn startup_and_shutdown_transition_application_to_stopped() {
+        let (_dir, config) = app_test_config();
         let mut app = Application::from_config_with_shutdown(
-            AppConfig::default(),
+            config,
             ShutdownController::immediate(),
-        );
+        )
+        .expect("application builds");
         assert_eq!(app.state.lifecycle, LifecycleState::Created);
 
         app.startup().await.expect("startup succeeds");
@@ -241,7 +262,8 @@ mod tests {
 
     #[test]
     fn runtime_summary_reflects_empty_registry() {
-        let app = Application::from_config(AppConfig::default());
+        let (_dir, config) = app_test_config();
+        let app = Application::from_config(config).expect("application builds");
         let summary = app.runtime.summary();
 
         assert_eq!(summary.registry.total_units, 0);
@@ -250,10 +272,10 @@ mod tests {
 
     #[test]
     fn audit_service_is_independent_from_metrics_flag() {
-        let mut config = AppConfig::default();
+        let (_dir, mut config) = app_test_config();
         config.observability.metrics_enabled = false;
 
-        let runtime = RuntimeState::from_config(&config);
+        let runtime = RuntimeState::from_config(&config).expect("runtime builds");
         let summary = runtime.summary();
 
         assert!(summary.audit_enabled);
@@ -261,10 +283,10 @@ mod tests {
 
     #[test]
     fn manual_mode_does_not_enable_dry_run() {
-        let mut config = AppConfig::default();
+        let (_dir, mut config) = app_test_config();
         config.runtime.manual_mode_enabled = true;
 
-        let runtime = RuntimeState::from_config(&config);
+        let runtime = RuntimeState::from_config(&config).expect("runtime builds");
         let summary = runtime.summary();
 
         assert!(!summary.host_api_dry_run);
@@ -272,15 +294,40 @@ mod tests {
 
     #[tokio::test]
     async fn application_run_with_immediate_shutdown_reaches_stopped_state() {
+        let (_dir, config) = app_test_config();
         let mut app = Application::from_config_with_shutdown(
-            AppConfig::default(),
+            config,
             ShutdownController::immediate(),
-        );
+        )
+        .expect("application builds");
 
         app.run().await.expect("application run succeeds");
 
         assert_eq!(app.state.lifecycle, LifecycleState::Stopped);
         assert!(app.state.started_at.is_some());
         assert!(app.state.stopped_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_fails_when_database_path_is_unopenable() {
+        let base = std::env::temp_dir().join(format!(
+            "telegram-moderation-os-app-startup-invalid-db-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let database_path = base.join("runtime.sqlite3");
+        fs::create_dir_all(&database_path).expect("db path directory exists");
+
+        let mut config = AppConfig::default();
+        config.paths.database_path = database_path;
+
+        let mut app = Application::from_config_with_shutdown(
+            config,
+            ShutdownController::immediate(),
+        )
+        .expect("application builds");
+
+        let error = app.startup().await.expect_err("startup must fail");
+        assert!(error.to_string().contains("failed to bootstrap storage"));
     }
 }

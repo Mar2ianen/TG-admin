@@ -7,9 +7,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::event::{EventContext, ExecutionMode};
-use crate::parser::command::{
-    CommandAst, DeleteCommand, MessageCommand, ParsedCommandLine,
-};
+use crate::parser::command::{CommandAst, DeleteCommand, MessageCommand, ParsedCommandLine};
 use crate::parser::dispatch::{
     CommandDispatchParseError, CommandDispatchResult, CommandDispatchSkip, EventCommandDispatcher,
 };
@@ -19,7 +17,8 @@ use crate::parser::reason::{
 };
 use crate::parser::target::{ParsedTargetSelector, ResolvedTarget, TargetSource};
 use crate::storage::{
-    AuditLogEntry, AuditLogFilter, JobRecord, ProcessedUpdateRecord, StorageConnection,
+    AuditLogEntry, AuditLogFilter, JobRecord, ProcessedUpdateRecord,
+    PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING, StorageConnection,
     StorageError, UserPatch,
 };
 use crate::tg::{
@@ -36,6 +35,7 @@ pub struct ModerationEngine {
     unit_registry: Option<Rc<UnitRegistry>>,
     dispatcher: EventCommandDispatcher,
     gateway: TelegramGateway,
+    admin_user_ids: Vec<i64>,
 }
 
 impl ModerationEngine {
@@ -46,6 +46,7 @@ impl ModerationEngine {
             unit_registry: None,
             dispatcher: EventCommandDispatcher::new(),
             gateway,
+            admin_user_ids: Vec::new(),
         }
     }
 
@@ -74,6 +75,14 @@ impl ModerationEngine {
         self
     }
 
+    pub fn with_admin_user_ids<I>(mut self, admin_user_ids: I) -> Self
+    where
+        I: IntoIterator<Item = i64>,
+    {
+        self.admin_user_ids = admin_user_ids.into_iter().collect();
+        self
+    }
+
     pub async fn handle_event(
         &self,
         event: &EventContext,
@@ -82,8 +91,12 @@ impl ModerationEngine {
             .validate_invariants()
             .map_err(|source| ModerationError::InvalidEvent(source.to_string()))?;
 
-        if let Some(record) = self.processed_update(event)? {
-            return Ok(ModerationEventResult::Replayed(record));
+        if let Some(record) = self.claim_processed_update(event)? {
+            if record.status == PROCESSED_UPDATE_STATUS_COMPLETED {
+                return Ok(ModerationEventResult::Replayed(record));
+            }
+
+            return Err(ModerationError::ProcessingInterrupted(record.event_id));
         }
 
         let result = match self.dispatcher.dispatch(event) {
@@ -102,17 +115,30 @@ impl ModerationEngine {
         Ok(result)
     }
 
-    fn processed_update(
+    fn claim_processed_update(
         &self,
         event: &EventContext,
     ) -> Result<Option<ProcessedUpdateRecord>, ModerationError> {
+        if self.dry_run {
+            return Ok(None);
+        }
+
         let Some(update_id) = event.update_id else {
             return Ok(None);
         };
 
-        self.storage
-            .get_processed_update(update_id as i64)
-            .map_err(ModerationError::Storage)
+        let existing = self
+            .storage
+            .mark_processed_update(&ProcessedUpdateRecord {
+                update_id: update_id as i64,
+                event_id: event.event_id.clone(),
+                processed_at: event.received_at.to_rfc3339(),
+                execution_mode: execution_mode_name(event.execution_mode).to_owned(),
+                status: PROCESSED_UPDATE_STATUS_PENDING.to_owned(),
+            })
+            .map_err(ModerationError::Storage)?;
+
+        Ok(existing)
     }
 
     fn mark_processed_update(&self, event: &EventContext) -> Result<(), ModerationError> {
@@ -126,12 +152,7 @@ impl ModerationEngine {
 
         let _ = self
             .storage
-            .mark_processed_update(&ProcessedUpdateRecord {
-                update_id: update_id as i64,
-                event_id: event.event_id.clone(),
-                processed_at: event.received_at.to_rfc3339(),
-                execution_mode: execution_mode_name(event.execution_mode).to_owned(),
-            })
+            .complete_processed_update(update_id as i64, &event.received_at.to_rfc3339())
             .map_err(ModerationError::Storage)?;
 
         Ok(())
@@ -143,7 +164,14 @@ impl ModerationEngine {
         parsed: &ParsedCommandLine,
         expanded: &ExpandedCommandLine,
     ) -> Result<ModerationExecution, ModerationError> {
+        self.require_admin(event)?;
         let effective_dry_run = self.dry_run || command_dry_run(&parsed.command);
+        if matches!(
+            (&expanded.command, &expanded.pipe),
+            (ExpandedCommandAst::Mute(_), Some(_))
+        ) {
+            self.require_capability(event, "job.schedule")?;
+        }
         let mut execution = match &expanded.command {
             ExpandedCommandAst::Warn(command) => {
                 self.execute_warn(event, command, effective_dry_run).await?
@@ -155,15 +183,18 @@ impl ModerationEngine {
                 self.execute_ban(event, command, effective_dry_run).await?
             }
             ExpandedCommandAst::Del(command) => {
-                self.execute_delete(event, command, effective_dry_run).await?
+                self.execute_delete(event, command, effective_dry_run)
+                    .await?
             }
             ExpandedCommandAst::Undo(_) => self.execute_undo(event, effective_dry_run).await?,
             ExpandedCommandAst::Msg(command) => {
-                self.execute_message(event, command, effective_dry_run).await?
+                self.execute_message(event, command, effective_dry_run)
+                    .await?
             }
         };
 
-        if let (ExpandedCommandAst::Mute(command), Some(pipe)) = (&expanded.command, &expanded.pipe) {
+        if let (ExpandedCommandAst::Mute(command), Some(pipe)) = (&expanded.command, &expanded.pipe)
+        {
             let scheduled_job = self.schedule_pipe(event, command, pipe, effective_dry_run)?;
             execution.jobs.push(scheduled_job);
         }
@@ -180,7 +211,10 @@ impl ModerationEngine {
         let target = describe_target(event, &command.command.target)?;
         let now = event.received_at.to_rfc3339();
         let previous_user = match target.user_id {
-            Some(user_id) => self.storage.get_user(user_id).map_err(ModerationError::Storage)?,
+            Some(user_id) => self
+                .storage
+                .get_user(user_id)
+                .map_err(ModerationError::Storage)?,
             None => None,
         };
 
@@ -211,7 +245,11 @@ impl ModerationEngine {
                 .execute_checked(
                     TelegramRequest::SendMessage(TelegramSendMessageRequest {
                         chat_id: require_chat_id(event)?,
-                        text: build_notice_text("warned", &target.label, command.expanded_reason.as_ref()),
+                        text: build_notice_text(
+                            "warned",
+                            &target.label,
+                            command.expanded_reason.as_ref(),
+                        ),
                         reply_to_message_id: trigger_message_id(event),
                         silent: command.command.flags.silent,
                         parse_mode: crate::tg::ParseMode::PlainText,
@@ -264,7 +302,7 @@ impl ModerationEngine {
         let target = describe_target(event, &command.command.target)?;
         let user_id = require_user_id(&target, "mute")?;
         let chat_id = require_chat_id(event)?;
-        let until = add_duration(event.received_at, command.command.duration);
+        let until = add_duration(event.received_at, command.command.duration)?;
         let reason = moderation_reason(command.expanded_reason.as_ref());
         let request = TelegramRequest::Restrict(TelegramRestrictRequest {
             chat_id,
@@ -291,7 +329,11 @@ impl ModerationEngine {
                 .execute_checked(
                     TelegramRequest::SendMessage(TelegramSendMessageRequest {
                         chat_id,
-                        text: build_notice_text("muted", &target.label, command.expanded_reason.as_ref()),
+                        text: build_notice_text(
+                            "muted",
+                            &target.label,
+                            command.expanded_reason.as_ref(),
+                        ),
                         reply_to_message_id: trigger_message_id(event),
                         silent: false,
                         parse_mode: crate::tg::ParseMode::PlainText,
@@ -311,9 +353,9 @@ impl ModerationEngine {
                 target: &target,
                 reversible: true,
                 compensation: Some(CompensationRecipe::Unrestrict {
-                chat_id,
-                user_id,
-                reason,
+                    chat_id,
+                    user_id,
+                    reason,
                 }),
                 args_json: json!({
                 "target": target.audit_target_json(),
@@ -374,9 +416,9 @@ impl ModerationEngine {
                 target: &target,
                 reversible: true,
                 compensation: Some(CompensationRecipe::Unban {
-                chat_id,
-                user_id,
-                reason,
+                    chat_id,
+                    user_id,
+                    reason,
                 }),
                 args_json: json!({
                 "target": target.audit_target_json(),
@@ -420,9 +462,9 @@ impl ModerationEngine {
         if let Some(since) = command.since {
             let threshold = event
                 .received_at
-                .checked_sub_signed(chrono::Duration::from_std(since.into_std()).map_err(|error| {
-                    ModerationError::Validation(format!("duration overflow: {error}"))
-                })?)
+                .checked_sub_signed(chrono::Duration::from_std(since.into_std()).map_err(
+                    |error| ModerationError::Validation(format!("duration overflow: {error}")),
+                )?)
                 .ok_or_else(|| ModerationError::Validation("invalid delete window".to_owned()))?;
             messages.retain(|message| {
                 DateTime::parse_from_rfc3339(&message.date_utc)
@@ -444,7 +486,9 @@ impl ModerationEngine {
             .iter()
             .map(|message| i32::try_from(message.message_id))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ModerationError::Validation("message_id exceeds telegram range".to_owned()))?;
+            .map_err(|_| {
+                ModerationError::Validation("message_id exceeds telegram range".to_owned())
+            })?;
         if message_ids.is_empty() {
             return Err(ModerationError::Validation(
                 "delete selection is empty after filters".to_owned(),
@@ -457,7 +501,10 @@ impl ModerationEngine {
                 TelegramRequest::DeleteMany(crate::tg::TelegramDeleteManyRequest {
                     chat_id,
                     message_ids: message_ids.clone(),
-                    idempotency_key: Some(format!("delete:{}:{}", event.event_id, anchor_message_id)),
+                    idempotency_key: Some(format!(
+                        "delete:{}:{}",
+                        event.event_id, anchor_message_id
+                    )),
                 }),
                 TelegramExecutionOptions { dry_run },
             )
@@ -525,13 +572,13 @@ impl ModerationEngine {
                     reference_message_id
                 ))
             })?;
+        let undo_idempotency_key = format!("undo:{}", original.action_id);
 
         let already_undone = !self
             .storage
             .find_audit_entries(
                 &AuditLogFilter {
-                    op: Some("undo".to_owned()),
-                    target_id: Some(original.action_id.clone()),
+                    idempotency_key: Some(undo_idempotency_key.clone()),
                     ..AuditLogFilter::default()
                 },
                 1,
@@ -545,23 +592,16 @@ impl ModerationEngine {
             )));
         }
 
-        let recipe: CompensationRecipe = serde_json::from_str(
-            original
-                .compensation_json
-                .as_deref()
-                .ok_or_else(|| ModerationError::Validation("audit entry is not reversible".to_owned()))?,
-        )
-        .map_err(|error| ModerationError::Validation(format!("invalid compensation recipe: {error}")))?;
+        let recipe: CompensationRecipe =
+            serde_json::from_str(original.compensation_json.as_deref().ok_or_else(|| {
+                ModerationError::Validation("audit entry is not reversible".to_owned())
+            })?)
+            .map_err(|error| {
+                ModerationError::Validation(format!("invalid compensation recipe: {error}"))
+            })?;
 
         let mut execution = ModerationExecution::new(dry_run);
-        let target = execute_compensation(
-            self,
-            event,
-            &recipe,
-            dry_run,
-            &mut execution,
-        )
-        .await?;
+        let target = execute_compensation(self, event, &recipe, dry_run, &mut execution).await?;
 
         let audit = self.build_audit_entry(
             event,
@@ -579,6 +619,10 @@ impl ModerationEngine {
                 })),
             },
         );
+        let audit = AuditLogEntry {
+            idempotency_key: Some(undo_idempotency_key),
+            ..audit
+        };
         if !dry_run {
             self.storage
                 .append_audit_entry(&audit)
@@ -626,12 +670,13 @@ impl ModerationEngine {
         pipe: &ExpandedCommandLine,
         dry_run: bool,
     ) -> Result<JobRecord, ModerationError> {
+        self.require_capability(event, "job.schedule")?;
         let ExpandedCommandAst::Msg(message) = &pipe.command else {
             return Err(ModerationError::UnsupportedCommand(
                 "only /msg pipe is supported in phase 6".to_owned(),
             ));
         };
-        let run_at = add_duration(event.received_at, command.command.duration).to_rfc3339();
+        let run_at = add_duration(event.received_at, command.command.duration)?.to_rfc3339();
         let now = event.received_at.to_rfc3339();
         let job = JobRecord {
             job_id: format!("job_{}", Uuid::new_v4().simple()),
@@ -639,7 +684,11 @@ impl ModerationEngine {
             run_at,
             scheduled_at: now.clone(),
             status: "scheduled".to_owned(),
-            dedupe_key: Some(format!("pipe:{}:{}", event.event_id, hash_text(&message.text))),
+            dedupe_key: Some(format!(
+                "pipe:{}:{}",
+                event.event_id,
+                hash_text(&message.text)
+            )),
             payload_json: json!({
                 "kind": "tg.send_message",
                 "chat_id": require_chat_id(event)?,
@@ -667,12 +716,21 @@ impl ModerationEngine {
         event: &EventContext,
         capability: &'static str,
     ) -> Result<(), ModerationError> {
-        let Some(unit) = event.system.unit.as_ref() else {
-            return Ok(());
-        };
-        let Some(registry) = self.unit_registry.as_deref() else {
-            return Ok(());
-        };
+        let unit = event
+            .system
+            .unit
+            .as_ref()
+            .ok_or_else(|| ModerationError::CapabilityDenied {
+                capability: capability.to_owned(),
+                unit_id: "runtime".to_owned(),
+            })?;
+        let registry =
+            self.unit_registry
+                .as_deref()
+                .ok_or_else(|| ModerationError::CapabilityDenied {
+                    capability: capability.to_owned(),
+                    unit_id: unit.id.clone(),
+                })?;
         let descriptor = registry
             .get(&unit.id)
             .ok_or_else(|| ModerationError::UnknownUnit(unit.id.clone()))?;
@@ -681,14 +739,23 @@ impl ModerationEngine {
             .as_ref()
             .ok_or_else(|| ModerationError::UnknownUnit(unit.id.clone()))?;
 
-        if manifest.capabilities.deny.iter().any(|value| value == capability) {
+        if manifest
+            .capabilities
+            .deny
+            .iter()
+            .any(|value| value == capability)
+        {
             return Err(ModerationError::CapabilityDenied {
                 capability: capability.to_owned(),
                 unit_id: unit.id.clone(),
             });
         }
         if !manifest.capabilities.allow.is_empty()
-            && !manifest.capabilities.allow.iter().any(|value| value == capability)
+            && !manifest
+                .capabilities
+                .allow
+                .iter()
+                .any(|value| value == capability)
         {
             return Err(ModerationError::CapabilityDenied {
                 capability: capability.to_owned(),
@@ -697,6 +764,24 @@ impl ModerationEngine {
         }
 
         Ok(())
+    }
+
+    fn require_admin(&self, event: &EventContext) -> Result<(), ModerationError> {
+        if event.is_synthetic() && event.sender.is_none() {
+            return Ok(());
+        }
+
+        let Some(sender) = event.sender.as_ref() else {
+            return Err(ModerationError::AuthorizationDenied { user_id: None });
+        };
+
+        if sender.is_admin || self.admin_user_ids.contains(&sender.id) {
+            return Ok(());
+        }
+
+        Err(ModerationError::AuthorizationDenied {
+            user_id: Some(sender.id),
+        })
     }
 
     fn build_audit_entry(&self, event: &EventContext, spec: AuditEntrySpec<'_>) -> AuditLogEntry {
@@ -768,6 +853,10 @@ pub enum ModerationError {
     UnknownUnit(String),
     #[error("operation denied for unit `{unit_id}`: missing capability `{capability}`")]
     CapabilityDenied { capability: String, unit_id: String },
+    #[error("actor is not authorized for moderation actions: user_id={user_id:?}")]
+    AuthorizationDenied { user_id: Option<i64> },
+    #[error("update processing was interrupted for event `{0}`")]
+    ProcessingInterrupted(String),
     #[error("storage error")]
     Storage(#[from] StorageError),
     #[error("telegram error: {0}")]
@@ -858,7 +947,9 @@ async fn execute_compensation(
                     .upsert_user(&UserPatch {
                         user_id,
                         username: current.as_ref().and_then(|value| value.username.clone()),
-                        display_name: current.as_ref().and_then(|value| value.display_name.clone()),
+                        display_name: current
+                            .as_ref()
+                            .and_then(|value| value.display_name.clone()),
                         seen_at: event.received_at.to_rfc3339(),
                         warn_count: Some(*previous_warn_count),
                         shadowbanned: None,
@@ -957,12 +1048,13 @@ fn describe_target(
             username: Some(username.clone()),
             label: format!("@{username}"),
         }),
-        ParsedTargetSelector::MessageAnchor { message_id } => Ok(ExecutionTarget::message_anchor(*message_id)),
+        ParsedTargetSelector::MessageAnchor { message_id } => {
+            Ok(ExecutionTarget::message_anchor(*message_id))
+        }
         ParsedTargetSelector::Reply => {
-            let reply = event
-                .reply
-                .as_ref()
-                .ok_or_else(|| ModerationError::Validation("reply target requires reply context".to_owned()))?;
+            let reply = event.reply.as_ref().ok_or_else(|| {
+                ModerationError::Validation("reply target requires reply context".to_owned())
+            })?;
             if let Some(user_id) = reply.sender_user_id {
                 Ok(ExecutionTarget {
                     kind: "user".to_owned(),
@@ -1013,21 +1105,23 @@ fn delete_anchor(
             .reply
             .as_ref()
             .map(|reply| (reply.message_id, reply.sender_user_id))
-            .ok_or_else(|| ModerationError::Validation("reply delete target requires reply context".to_owned())),
+            .ok_or_else(|| {
+                ModerationError::Validation("reply delete target requires reply context".to_owned())
+            }),
         (ParsedTargetSelector::UserId { user_id }, TargetSource::ReplyContext) => event
             .reply
             .as_ref()
             .map(|reply| (reply.message_id, Some(*user_id)))
-            .ok_or_else(|| ModerationError::Validation("reply delete target requires reply context".to_owned())),
+            .ok_or_else(|| {
+                ModerationError::Validation("reply delete target requires reply context".to_owned())
+            }),
         _ => Err(ModerationError::Validation(
             "delete command requires a message anchor or reply context".to_owned(),
         )),
     }
 }
 
-fn resolve_numeric_user_filter(
-    selector: &ParsedTargetSelector,
-) -> Result<i64, ModerationError> {
+fn resolve_numeric_user_filter(selector: &ParsedTargetSelector) -> Result<i64, ModerationError> {
     match selector {
         ParsedTargetSelector::UserId { user_id } => Ok(*user_id),
         _ => Err(ModerationError::Validation(
@@ -1057,7 +1151,12 @@ fn trigger_message_id(event: &EventContext) -> Option<MessageId> {
         .message
         .as_ref()
         .map(|message| message.id)
-        .or_else(|| event.callback.as_ref().and_then(|callback| callback.message_id))
+        .or_else(|| {
+            event
+                .callback
+                .as_ref()
+                .and_then(|callback| callback.message_id)
+        })
 }
 
 fn undo_reference_message_id(event: &EventContext) -> Result<MessageId, ModerationError> {
@@ -1065,7 +1164,12 @@ fn undo_reference_message_id(event: &EventContext) -> Result<MessageId, Moderati
         .message
         .as_ref()
         .and_then(|message| message.reply_to_message_id)
-        .or_else(|| event.callback.as_ref().and_then(|callback| callback.message_id))
+        .or_else(|| {
+            event
+                .callback
+                .as_ref()
+                .and_then(|callback| callback.message_id)
+        })
         .ok_or_else(|| {
             ModerationError::Validation(
                 "undo requires reply_to_message_id or callback message context".to_owned(),
@@ -1073,11 +1177,7 @@ fn undo_reference_message_id(event: &EventContext) -> Result<MessageId, Moderati
         })
 }
 
-fn build_notice_text(
-    action: &str,
-    target: &str,
-    reason: Option<&ExpandedReason>,
-) -> String {
+fn build_notice_text(action: &str, target: &str, reason: Option<&ExpandedReason>) -> String {
     let reason = reason
         .map(reason_text)
         .unwrap_or_else(|| "without a recorded reason".to_owned());
@@ -1131,13 +1231,16 @@ fn muted_permissions() -> TelegramPermissions {
     }
 }
 
-fn add_duration(received_at: DateTime<Utc>, duration: crate::parser::duration::ParsedDuration) -> DateTime<Utc> {
-    received_at
-        .checked_add_signed(
-            chrono::Duration::from_std(duration.into_std())
-                .expect("parsed duration should convert to chrono duration"),
-        )
-        .expect("mute duration should stay within valid chrono range")
+fn add_duration(
+    received_at: DateTime<Utc>,
+    duration: crate::parser::duration::ParsedDuration,
+) -> Result<DateTime<Utc>, ModerationError> {
+    let chrono_duration = chrono::Duration::from_std(duration.into_std())
+        .map_err(|error| ModerationError::Validation(format!("duration overflow: {error}")))?;
+
+    received_at.checked_add_signed(chrono_duration).ok_or_else(|| {
+        ModerationError::Validation("mute duration exceeds supported range".to_owned())
+    })
 }
 
 fn command_dry_run(command: &CommandAst) -> bool {
@@ -1178,13 +1281,18 @@ mod tests {
         TelegramDeleteResult, TelegramGateway, TelegramMessageResult, TelegramRequest,
         TelegramResult, TelegramTransport, TelegramUiResult,
     };
-    use crate::unit::{CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry};
+    use crate::unit::{
+        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
+    };
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
-    use crate::storage::{AuditLogFilter, MessageJournalRecord, Storage};
+    use crate::storage::{
+        AuditLogFilter, MessageJournalRecord, ProcessedUpdateRecord,
+        PROCESSED_UPDATE_STATUS_PENDING, Storage,
+    };
 
     #[derive(Debug, Default)]
     struct RecordingTransport {
@@ -1201,47 +1309,62 @@ mod tests {
             &self,
             request: TelegramRequest,
         ) -> Result<TelegramResult, crate::tg::TelegramError> {
-            self.requests.lock().expect("requests lock").push(request.clone());
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
 
             Ok(match request {
-                TelegramRequest::SendMessage(request) => TelegramResult::Message(TelegramMessageResult {
-                    chat_id: request.chat_id,
-                    message_id: request.reply_to_message_id.unwrap_or(900).saturating_add(1),
-                    raw_passthrough: false,
-                }),
-                TelegramRequest::DeleteMany(request) => TelegramResult::Delete(TelegramDeleteResult {
-                    chat_id: request.chat_id,
-                    deleted: request.message_ids,
-                    failed: Vec::new(),
-                }),
-                TelegramRequest::Restrict(request) => TelegramResult::Restriction(crate::tg::TelegramRestrictionResult {
-                    chat_id: request.chat_id,
-                    user_id: request.user_id,
-                    until: request.until,
-                    permissions: request.permissions,
-                    changed: true,
-                }),
-                TelegramRequest::Unrestrict(request) => TelegramResult::Restriction(crate::tg::TelegramRestrictionResult {
-                    chat_id: request.chat_id,
-                    user_id: request.user_id,
-                    until: None,
-                    permissions: crate::tg::TelegramPermissions::default(),
-                    changed: true,
-                }),
-                TelegramRequest::Ban(request) => TelegramResult::Ban(crate::tg::TelegramBanResult {
-                    chat_id: request.chat_id,
-                    user_id: request.user_id,
-                    until: request.until,
-                    delete_history: request.delete_history,
-                    changed: true,
-                }),
-                TelegramRequest::Unban(request) => TelegramResult::Ban(crate::tg::TelegramBanResult {
-                    chat_id: request.chat_id,
-                    user_id: request.user_id,
-                    until: None,
-                    delete_history: false,
-                    changed: true,
-                }),
+                TelegramRequest::SendMessage(request) => {
+                    TelegramResult::Message(TelegramMessageResult {
+                        chat_id: request.chat_id,
+                        message_id: request.reply_to_message_id.unwrap_or(900).saturating_add(1),
+                        raw_passthrough: false,
+                    })
+                }
+                TelegramRequest::DeleteMany(request) => {
+                    TelegramResult::Delete(TelegramDeleteResult {
+                        chat_id: request.chat_id,
+                        deleted: request.message_ids,
+                        failed: Vec::new(),
+                    })
+                }
+                TelegramRequest::Restrict(request) => {
+                    TelegramResult::Restriction(crate::tg::TelegramRestrictionResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: request.until,
+                        permissions: request.permissions,
+                        changed: true,
+                    })
+                }
+                TelegramRequest::Unrestrict(request) => {
+                    TelegramResult::Restriction(crate::tg::TelegramRestrictionResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: None,
+                        permissions: crate::tg::TelegramPermissions::default(),
+                        changed: true,
+                    })
+                }
+                TelegramRequest::Ban(request) => {
+                    TelegramResult::Ban(crate::tg::TelegramBanResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: request.until,
+                        delete_history: request.delete_history,
+                        changed: true,
+                    })
+                }
+                TelegramRequest::Unban(request) => {
+                    TelegramResult::Ban(crate::tg::TelegramBanResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: None,
+                        delete_history: false,
+                        changed: true,
+                    })
+                }
                 TelegramRequest::SendUi(request) => TelegramResult::Ui(TelegramUiResult {
                     chat_id: request.chat_id,
                     message_id: request.reply_to_message_id.unwrap_or(700).saturating_add(1),
@@ -1261,12 +1384,14 @@ mod tests {
                     deleted: vec![request.message_id],
                     failed: Vec::new(),
                 }),
-                TelegramRequest::AnswerCallback(request) => TelegramResult::Callback(crate::tg::TelegramCallbackResult {
-                    callback_query_id: request.callback_query_id,
-                    answered: true,
-                    show_alert: request.show_alert,
-                    text: request.text,
-                }),
+                TelegramRequest::AnswerCallback(request) => {
+                    TelegramResult::Callback(crate::tg::TelegramCallbackResult {
+                        callback_query_id: request.callback_query_id,
+                        answered: true,
+                        show_alert: request.show_alert,
+                        text: request.text,
+                    })
+                }
             })
         }
     }
@@ -1298,6 +1423,17 @@ mod tests {
         }
     }
 
+    fn non_admin_sender() -> SenderContext {
+        SenderContext {
+            id: 777,
+            username: Some("member".to_owned()),
+            display_name: Some("Member".to_owned()),
+            is_bot: false,
+            is_admin: false,
+            role: Some("member".to_owned()),
+        }
+    }
+
     fn registry_with_caps(caps: &[&str]) -> UnitRegistry {
         let mut manifest = UnitManifest::new(
             UnitDefinition::new("moderation.test"),
@@ -1311,7 +1447,27 @@ mod tests {
         UnitRegistry::load_manifests(vec![manifest]).registry
     }
 
-    fn engine_with_caps(caps: &[&str]) -> (tempfile::TempDir, Arc<Mutex<Vec<TelegramRequest>>>, ModerationEngine) {
+    fn engine_with_caps(
+        caps: &[&str],
+    ) -> (
+        tempfile::TempDir,
+        Arc<Mutex<Vec<TelegramRequest>>>,
+        ModerationEngine,
+    ) {
+        engine_with_caps_and_admins(caps, [])
+    }
+
+    fn engine_with_caps_and_admins<I>(
+        caps: &[&str],
+        admin_user_ids: I,
+    ) -> (
+        tempfile::TempDir,
+        Arc<Mutex<Vec<TelegramRequest>>>,
+        ModerationEngine,
+    )
+    where
+        I: IntoIterator<Item = i64>,
+    {
         let dir = tempdir().expect("tempdir");
         let storage = Storage::new(dir.path().join("runtime.sqlite3"))
             .bootstrap()
@@ -1322,7 +1478,28 @@ mod tests {
             requests: Arc::clone(&requests),
         };
         let gateway = TelegramGateway::new(false).with_transport(transport);
-        let engine = ModerationEngine::new(storage, gateway).with_unit_registry(registry_with_caps(caps));
+        let engine = ModerationEngine::new(storage, gateway)
+            .with_unit_registry(registry_with_caps(caps))
+            .with_admin_user_ids(admin_user_ids);
+        (dir, requests, engine)
+    }
+
+    fn engine_without_registry() -> (
+        tempfile::TempDir,
+        Arc<Mutex<Vec<TelegramRequest>>>,
+        ModerationEngine,
+    ) {
+        let dir = tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("runtime.sqlite3"))
+            .bootstrap()
+            .expect("bootstrap")
+            .into_connection();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = RecordingTransport {
+            requests: Arc::clone(&requests),
+        };
+        let gateway = TelegramGateway::new(false).with_transport(transport);
+        let engine = ModerationEngine::new(storage, gateway);
         (dir, requests, engine)
     }
 
@@ -1340,7 +1517,11 @@ mod tests {
             .expect("manual event normalizes")
     }
 
-    fn reply_event(command_text: &str, reply_user_id: i64, reply_message_id: i32) -> crate::event::EventContext {
+    fn reply_event(
+        command_text: &str,
+        reply_user_id: i64,
+        reply_message_id: i32,
+    ) -> crate::event::EventContext {
         let mut event = manual_event(command_text);
         event.reply = Some(ReplyContext {
             message_id: reply_message_id,
@@ -1359,6 +1540,17 @@ mod tests {
             reply_to_message_id: Some(reply_message_id),
             media_group_id: None,
         });
+        event
+    }
+
+    fn reply_event_with_sender(
+        command_text: &str,
+        reply_user_id: i64,
+        reply_message_id: i32,
+        sender: SenderContext,
+    ) -> crate::event::EventContext {
+        let mut event = reply_event(command_text, reply_user_id, reply_message_id);
+        event.sender = Some(sender);
         event
     }
 
@@ -1394,7 +1586,11 @@ mod tests {
             panic!("expected executed result");
         };
         assert_eq!(execution.audit_entries.len(), 1);
-        let user = engine.storage.get_user(99).expect("user lookup").expect("user exists");
+        let user = engine
+            .storage
+            .get_user(99)
+            .expect("user lookup")
+            .expect("user exists");
         assert_eq!(user.warn_count, 1);
         assert_eq!(execution.audit_entries[0].op, "warn");
         assert!(execution.audit_entries[0].reversible);
@@ -1425,6 +1621,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mute_pipe_requires_job_schedule_before_side_effects() {
+        let (_dir, requests, engine) = engine_with_caps(&["tg.moderate.restrict"]);
+        let event = reply_event(r#"/mute 30m spam | /msg "mute expired""#, 99, 810);
+
+        let error = engine
+            .handle_event(&event)
+            .await
+            .expect_err("mute pipe must be denied");
+
+        assert!(matches!(
+            error,
+            ModerationError::CapabilityDenied {
+                capability,
+                unit_id,
+            } if capability == "job.schedule" && unit_id == "moderation.test"
+        ));
+        assert!(requests.lock().expect("requests").is_empty());
+        assert!(
+            engine
+                .storage
+                .find_audit_entries(&AuditLogFilter::default(), 10)
+                .expect("audit lookup")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn delete_window_uses_anchor_and_user_filter() {
         let (_dir, requests, engine) = engine_with_caps(&["tg.moderate.delete"]);
         seed_journal(&engine);
@@ -1448,14 +1671,20 @@ mod tests {
         let (_dir, requests, engine) =
             engine_with_caps(&["tg.moderate.restrict", "audit.compensate"]);
         let mute_event = reply_event("/mute 30m spam", 99, 810);
-        let mute_result = engine.handle_event(&mute_event).await.expect("mute succeeds");
+        let mute_result = engine
+            .handle_event(&mute_event)
+            .await
+            .expect("mute succeeds");
         let ModerationEventResult::Executed(mute_execution) = mute_result else {
             panic!("expected executed mute");
         };
         let original_action_id = mute_execution.audit_entries[0].action_id.clone();
 
         let undo_event = reply_event("/undo", 99, 900);
-        let undo_result = engine.handle_event(&undo_event).await.expect("undo succeeds");
+        let undo_result = engine
+            .handle_event(&undo_event)
+            .await
+            .expect("undo succeeds");
 
         let ModerationEventResult::Executed(execution) = undo_result else {
             panic!("expected executed undo");
@@ -1481,6 +1710,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undo_cannot_compensate_same_action_twice() {
+        let (_dir, _requests, engine) =
+            engine_with_caps(&["tg.moderate.restrict", "audit.compensate"]);
+        let mute_event = reply_event("/mute 30m spam", 99, 810);
+        let mute_result = engine
+            .handle_event(&mute_event)
+            .await
+            .expect("mute succeeds");
+        let ModerationEventResult::Executed(mute_execution) = mute_result else {
+            panic!("expected executed mute");
+        };
+
+        let undo_event = reply_event("/undo", 99, 900);
+        let first_undo = engine
+            .handle_event(&undo_event)
+            .await
+            .expect("first undo succeeds");
+        assert!(matches!(first_undo, ModerationEventResult::Executed(_)));
+
+        let error = engine
+            .handle_event(&undo_event)
+            .await
+            .expect_err("second undo must fail");
+
+        assert!(matches!(
+            error,
+            ModerationError::Validation(message)
+            if message == format!("action {} is already compensated", mute_execution.audit_entries[0].action_id)
+        ));
+    }
+
+    #[tokio::test]
     async fn replayed_update_is_skipped_without_duplicate_transport_calls() {
         let (_dir, requests, engine) = engine_with_caps(&["tg.moderate.delete"]);
         seed_journal(&engine);
@@ -1502,11 +1763,15 @@ mod tests {
         );
         input.event_id = Some("evt_tg_delete".to_owned());
         input.received_at = ts();
-        let event = normalizer
+        let mut event = normalizer
             .normalize_telegram(input)
             .expect("telegram event normalizes");
+        event.system.unit = Some(UnitContext::new("moderation.test").with_trigger("telegram"));
 
-        let first = engine.handle_event(&event).await.expect("first pass succeeds");
+        let first = engine
+            .handle_event(&event)
+            .await
+            .expect("first pass succeeds");
         assert!(matches!(first, ModerationEventResult::Executed(_)));
         let second = engine.handle_event(&event).await.expect("replay succeeds");
         assert!(matches!(second, ModerationEventResult::Replayed(_)));
@@ -1514,11 +1779,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_realtime_update_fails_closed_without_reexecution() {
+        let (_dir, requests, engine) = engine_with_caps(&["tg.moderate.delete"]);
+        seed_journal(&engine);
+        let normalizer = EventNormalizer::new();
+        let mut input = TelegramUpdateInput::message(
+            1002,
+            chat(),
+            sender(),
+            MessageContext {
+                id: 811,
+                date: ts(),
+                text: Some("/del msg:811".to_owned()),
+                entities: vec!["bot_command".to_owned()],
+                has_media: false,
+                file_ids: Vec::new(),
+                reply_to_message_id: None,
+                media_group_id: None,
+            },
+        );
+        input.event_id = Some("evt_tg_delete_pending".to_owned());
+        input.received_at = ts();
+        let mut event = normalizer
+            .normalize_telegram(input)
+            .expect("telegram event normalizes");
+        event.system.unit = Some(UnitContext::new("moderation.test").with_trigger("telegram"));
+        engine
+            .storage
+            .mark_processed_update(&ProcessedUpdateRecord {
+                update_id: 1002,
+                event_id: "evt_tg_delete_pending".to_owned(),
+                processed_at: ts().to_rfc3339(),
+                execution_mode: "realtime".to_owned(),
+                status: PROCESSED_UPDATE_STATUS_PENDING.to_owned(),
+            })
+            .expect("pending mark succeeds");
+
+        let error = engine
+            .handle_event(&event)
+            .await
+            .expect_err("pending update must fail closed");
+
+        assert!(matches!(
+            error,
+            ModerationError::ProcessingInterrupted(event_id)
+            if event_id == "evt_tg_delete_pending"
+        ));
+        assert!(requests.lock().expect("requests").is_empty());
+    }
+
+    #[tokio::test]
     async fn capability_denial_is_structured() {
         let (_dir, _requests, engine) = engine_with_caps(&["audit.compensate"]);
         let event = reply_event("/mute 30m spam", 99, 810);
 
-        let error = engine.handle_event(&event).await.expect_err("mute must be denied");
+        let error = engine
+            .handle_event(&event)
+            .await
+            .expect_err("mute must be denied");
 
         assert!(matches!(
             error,
@@ -1527,5 +1845,54 @@ mod tests {
                 unit_id,
             } if capability == "tg.moderate.restrict" && unit_id == "moderation.test"
         ));
+    }
+
+    #[tokio::test]
+    async fn capability_gated_operation_fails_closed_without_registry() {
+        let (_dir, requests, engine) = engine_without_registry();
+        let event = reply_event("/mute 30m spam", 99, 810);
+
+        let error = engine
+            .handle_event(&event)
+            .await
+            .expect_err("mute must be denied without registry");
+
+        assert!(matches!(
+            error,
+            ModerationError::CapabilityDenied {
+                capability,
+                unit_id,
+            } if capability == "tg.moderate.restrict" && unit_id == "moderation.test"
+        ));
+        assert!(requests.lock().expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_admin_sender_cannot_execute_moderation_command() {
+        let (_dir, requests, engine) = engine_with_caps(&["tg.moderate.restrict"]);
+        let event = reply_event_with_sender("/mute 30m spam", 99, 810, non_admin_sender());
+
+        let error = engine
+            .handle_event(&event)
+            .await
+            .expect_err("non-admin sender must be denied");
+
+        assert!(matches!(
+            error,
+            ModerationError::AuthorizationDenied { user_id: Some(777) }
+        ));
+        assert!(requests.lock().expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn configured_admin_id_can_execute_even_without_sender_admin_flag() {
+        let (_dir, requests, engine) =
+            engine_with_caps_and_admins(&["tg.moderate.restrict"], [777]);
+        let event = reply_event_with_sender("/mute 30m spam", 99, 810, non_admin_sender());
+
+        let result = engine.handle_event(&event).await.expect("configured admin succeeds");
+
+        assert!(matches!(result, ModerationEventResult::Executed(_)));
+        assert_eq!(requests.lock().expect("requests").len(), 1);
     }
 }

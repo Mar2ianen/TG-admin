@@ -92,6 +92,7 @@ pub fn parse_target_selector(input: &str) -> Result<ParsedTargetSelector, Target
     if input.starts_with('{') {
         let raw = serde_json::from_str(input)
             .map_err(|_| TargetParseError::InvalidSelector(input.to_owned()))?;
+        validate_json_selector(&raw, input)?;
         return Ok(ParsedTargetSelector::JsonSelector { raw });
     }
 
@@ -100,6 +101,64 @@ pub fn parse_target_selector(input: &str) -> Result<ParsedTargetSelector, Target
     }
 
     Err(TargetParseError::InvalidSelector(input.to_owned()))
+}
+
+fn validate_json_selector(raw: &Value, input: &str) -> Result<(), TargetParseError> {
+    let object = raw
+        .as_object()
+        .ok_or_else(|| TargetParseError::InvalidSelector(input.to_owned()))?;
+
+    if object.is_empty() {
+        return Err(TargetParseError::InvalidSelector(input.to_owned()));
+    }
+
+    for key in object.keys() {
+        if !matches!(key.as_str(), "kind" | "id" | "username") {
+            return Err(TargetParseError::InvalidSelector(input.to_owned()));
+        }
+    }
+
+    if let Some(kind) = object.get("kind") {
+        if kind.as_str() != Some("user") {
+            return Err(TargetParseError::InvalidSelector(input.to_owned()));
+        }
+    }
+
+    let has_id = match object.get("id") {
+        Some(value) => {
+            let Some(id) = value.as_i64() else {
+                return Err(TargetParseError::InvalidSelector(input.to_owned()));
+            };
+            if id == 0 {
+                return Err(TargetParseError::InvalidSelector(input.to_owned()));
+            }
+            true
+        }
+        None => false,
+    };
+
+    let has_username = match object.get("username") {
+        Some(value) => {
+            let Some(username) = value.as_str() else {
+                return Err(TargetParseError::InvalidSelector(input.to_owned()));
+            };
+            if username.is_empty()
+                || !username
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                return Err(TargetParseError::InvalidSelector(input.to_owned()));
+            }
+            true
+        }
+        None => false,
+    };
+
+    if !has_id && !has_username {
+        return Err(TargetParseError::InvalidSelector(input.to_owned()));
+    }
+
+    Ok(())
 }
 
 pub fn resolve_target(
@@ -139,8 +198,8 @@ pub fn resolve_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedTargetSelector, ResolvedTarget, TargetParseError, TargetSelectorParser, TargetSource,
-        resolve_target,
+        resolve_target, ParsedTargetSelector, ResolvedTarget, TargetParseError,
+        TargetSelectorParser, TargetSource,
     };
     use crate::event::{
         EventContext, ExecutionMode, MessageContext, ReplyContext, SystemContext, UpdateType,
@@ -259,6 +318,59 @@ mod tests {
             err,
             TargetParseError::InvalidUsername("@bad-name".to_owned())
         );
+    }
+
+    #[test]
+    fn accepts_only_bounded_json_selector_shapes() {
+        let parser = TargetSelectorParser::new();
+
+        assert_eq!(
+            parser
+                .parse(r#"{"id":42}"#)
+                .expect("id-only json selector parses"),
+            ParsedTargetSelector::JsonSelector {
+                raw: json!({"id": 42}),
+            }
+        );
+        assert_eq!(
+            parser
+                .parse(r#"{"username":"spam_user"}"#)
+                .expect("username-only json selector parses"),
+            ParsedTargetSelector::JsonSelector {
+                raw: json!({"username": "spam_user"}),
+            }
+        );
+        assert_eq!(
+            parser
+                .parse(r#"{"kind":"user","id":42,"username":"spam_user"}"#)
+                .expect("full json selector parses"),
+            ParsedTargetSelector::JsonSelector {
+                raw: json!({"kind": "user", "id": 42, "username": "spam_user"}),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_loose_or_invalid_json_selectors() {
+        let parser = TargetSelectorParser::new();
+        let invalid_inputs = vec![
+            r#"{}"#,
+            r#"[]"#,
+            r#"{"kind":"chat","id":42}"#,
+            r#"{"kind":"user"}"#,
+            r#"{"id":0}"#,
+            r#"{"id":"42"}"#,
+            r#"{"username":""}"#,
+            r#"{"username":"bad-name"}"#,
+            r#"{"kind":"user","id":42,"extra":true}"#,
+        ];
+
+        for input in invalid_inputs {
+            let err = parser
+                .parse(input)
+                .expect_err("selector should be rejected");
+            assert_eq!(err, TargetParseError::InvalidSelector(input.to_owned()));
+        }
     }
 
     #[test]

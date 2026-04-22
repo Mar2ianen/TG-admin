@@ -1,0 +1,790 @@
+use std::collections::BTreeMap;
+
+use crate::event::{
+    AuthorSourceClass, ChatRouteClass, CommandSource, EventContext, ExecutionMode, UpdateType,
+};
+use crate::moderation::{ModerationEngine, ModerationError, ModerationEventResult};
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct EventClassifier;
+
+impl Default for EventClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventClassifier {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn classify(&self, event: &EventContext) -> ClassifiedEvent {
+        let mut traits = Vec::new();
+        push_unique(&mut traits, event_trait_for_update_type(event.update_type));
+
+        if event
+            .message
+            .as_ref()
+            .and_then(|message| message.text.as_deref())
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            push_unique(&mut traits, EventTrait::Text);
+        }
+        if event.reply.is_some() {
+            push_unique(&mut traits, EventTrait::Reply);
+        }
+        if event.message.as_ref().is_some_and(|message| message.has_media) {
+            push_unique(&mut traits, EventTrait::Media);
+        }
+        if event
+            .message
+            .as_ref()
+            .and_then(|message| message.media_group_id.as_deref())
+            .is_some()
+        {
+            push_unique(&mut traits, EventTrait::MediaGroup);
+        }
+        if event
+            .callback
+            .as_ref()
+            .and_then(|callback| callback.data.as_deref())
+            .is_some()
+        {
+            push_unique(&mut traits, EventTrait::CallbackData);
+        }
+        if event.is_linked_channel_style_approx() {
+            push_unique(&mut traits, EventTrait::LinkedChannelStyle);
+        }
+
+        let command_name = extract_command_name(event);
+        if command_name.is_some() {
+            push_unique(&mut traits, EventTrait::Command);
+        }
+
+        ClassifiedEvent {
+            ingress_class: ingress_class_for(event.execution_mode),
+            chat_scope: chat_scope_for(event),
+            author_kind: author_kind_for(event),
+            update_type: event.update_type,
+            traits,
+            command_name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum IngressClass {
+    Realtime,
+    Recovery,
+    Scheduled,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum EventTrait {
+    Message,
+    EditedMessage,
+    ChannelPost,
+    EditedChannelPost,
+    CallbackQuery,
+    ChatMember,
+    MyChatMember,
+    JoinRequest,
+    Job,
+    System,
+    Text,
+    Command,
+    Reply,
+    Media,
+    MediaGroup,
+    CallbackData,
+    LinkedChannelStyle,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum RouteBucket {
+    IngressClass(IngressClass),
+    ChatScope(ChatScope),
+    AuthorKind(AuthorKind),
+    EventTrait(EventTrait),
+    CommandIndex(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ClassifiedEvent {
+    pub ingress_class: IngressClass,
+    pub chat_scope: ChatScope,
+    pub author_kind: AuthorKind,
+    pub update_type: UpdateType,
+    pub traits: Vec<EventTrait>,
+    pub command_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ExecutionLane {
+    BuiltInModeration,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum ChatScope {
+    Private,
+    Group,
+    Supergroup,
+    Channel,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum AuthorKind {
+    HumanAdmin,
+    HumanMember,
+    Bot,
+    ChannelIdentity,
+    System,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct RoutePlan {
+    pub classified: ClassifiedEvent,
+    pub matched_buckets: Vec<RouteBucket>,
+    pub lanes: Vec<ExecutionLane>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouterIndex {
+    ingress_index: BTreeMap<IngressClass, Vec<ExecutionLane>>,
+    chat_scope_index: BTreeMap<ChatScope, Vec<ExecutionLane>>,
+    author_index: BTreeMap<AuthorKind, Vec<ExecutionLane>>,
+    trait_index: BTreeMap<EventTrait, Vec<ExecutionLane>>,
+    command_index: BTreeMap<String, Vec<ExecutionLane>>,
+}
+
+impl RouterIndex {
+    pub fn new() -> Self {
+        Self {
+            ingress_index: BTreeMap::new(),
+            chat_scope_index: BTreeMap::new(),
+            author_index: BTreeMap::new(),
+            trait_index: BTreeMap::new(),
+            command_index: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_builtin_moderation_commands() -> Self {
+        let mut index = Self::new();
+        for command in ["warn", "mute", "ban", "del", "undo", "msg"] {
+            index.command_index.insert(
+                command.to_owned(),
+                vec![ExecutionLane::BuiltInModeration],
+            );
+        }
+        index
+    }
+
+    pub fn register_ingress_lane(
+        mut self,
+        ingress_class: IngressClass,
+        lane: ExecutionLane,
+    ) -> Self {
+        self.ingress_index
+            .entry(ingress_class)
+            .or_default()
+            .push(lane);
+        self
+    }
+
+    pub fn register_trait_lane(mut self, event_trait: EventTrait, lane: ExecutionLane) -> Self {
+        self.trait_index.entry(event_trait).or_default().push(lane);
+        self
+    }
+
+    pub fn register_chat_scope_lane(
+        mut self,
+        chat_scope: ChatScope,
+        lane: ExecutionLane,
+    ) -> Self {
+        self.chat_scope_index.entry(chat_scope).or_default().push(lane);
+        self
+    }
+
+    pub fn register_author_lane(mut self, author_kind: AuthorKind, lane: ExecutionLane) -> Self {
+        self.author_index.entry(author_kind).or_default().push(lane);
+        self
+    }
+
+    pub fn register_command_lane(
+        mut self,
+        command_name: impl Into<String>,
+        lane: ExecutionLane,
+    ) -> Self {
+        self.command_index
+            .entry(command_name.into())
+            .or_default()
+            .push(lane);
+        self
+    }
+
+    pub fn plan(&self, classified: ClassifiedEvent) -> RoutePlan {
+        let mut matched_buckets = vec![
+            RouteBucket::IngressClass(classified.ingress_class),
+            RouteBucket::ChatScope(classified.chat_scope),
+            RouteBucket::AuthorKind(classified.author_kind),
+        ];
+        let mut lanes = Vec::new();
+
+        if let Some(indexed_lanes) = self.ingress_index.get(&classified.ingress_class) {
+            extend_unique(&mut lanes, indexed_lanes.iter().copied());
+        }
+        if let Some(indexed_lanes) = self.chat_scope_index.get(&classified.chat_scope) {
+            extend_unique(&mut lanes, indexed_lanes.iter().copied());
+        }
+        if let Some(indexed_lanes) = self.author_index.get(&classified.author_kind) {
+            extend_unique(&mut lanes, indexed_lanes.iter().copied());
+        }
+
+        for event_trait in &classified.traits {
+            matched_buckets.push(RouteBucket::EventTrait(*event_trait));
+            if let Some(indexed_lanes) = self.trait_index.get(event_trait) {
+                extend_unique(&mut lanes, indexed_lanes.iter().copied());
+            }
+        }
+
+        if let Some(command_name) = classified.command_name.as_ref() {
+            matched_buckets.push(RouteBucket::CommandIndex(command_name.clone()));
+            if let Some(indexed_lanes) = self.command_index.get(command_name) {
+                extend_unique(&mut lanes, indexed_lanes.iter().copied());
+            }
+        }
+
+        RoutePlan {
+            classified,
+            matched_buckets,
+            lanes,
+        }
+    }
+}
+
+impl Default for RouterIndex {
+    fn default() -> Self {
+        Self::with_builtin_moderation_commands()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionRouter {
+    classifier: EventClassifier,
+    index: RouterIndex,
+    moderation: Option<ModerationEngine>,
+}
+
+impl ExecutionRouter {
+    pub fn new() -> Self {
+        Self {
+            classifier: EventClassifier::new(),
+            index: RouterIndex::default(),
+            moderation: None,
+        }
+    }
+
+    pub fn with_index(mut self, index: RouterIndex) -> Self {
+        self.index = index;
+        self
+    }
+
+    pub fn with_moderation(mut self, moderation: ModerationEngine) -> Self {
+        self.moderation = Some(moderation);
+        self
+    }
+
+    pub fn plan(&self, event: &EventContext) -> RoutePlan {
+        self.index.plan(self.classifier.classify(event))
+    }
+
+    pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
+        let plan = self.plan(event);
+
+        if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
+            let moderation = self
+                .moderation
+                .as_ref()
+                .ok_or(RoutingError::MissingLaneExecutor {
+                    lane: ExecutionLane::BuiltInModeration,
+                })?;
+            let result = moderation.handle_event(event).await?;
+            return Ok(ExecutionOutcome::BuiltInModeration { plan, result });
+        }
+
+        Ok(ExecutionOutcome::Unhandled(plan))
+    }
+}
+
+impl Default for ExecutionRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug)]
+pub enum RoutingError {
+    MissingLaneExecutor { lane: ExecutionLane },
+    Moderation(ModerationError),
+}
+
+impl std::fmt::Display for RoutingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingLaneExecutor { lane } => {
+                write!(f, "missing executor for routing lane {:?}", lane)
+            }
+            Self::Moderation(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for RoutingError {}
+
+impl From<ModerationError> for RoutingError {
+    fn from(value: ModerationError) -> Self {
+        Self::Moderation(value)
+    }
+}
+
+#[derive(Debug)]
+pub enum ExecutionOutcome {
+    BuiltInModeration {
+        plan: RoutePlan,
+        result: ModerationEventResult,
+    },
+    Unhandled(RoutePlan),
+}
+
+fn ingress_class_for(mode: ExecutionMode) -> IngressClass {
+    match mode {
+        ExecutionMode::Realtime => IngressClass::Realtime,
+        ExecutionMode::Recovery => IngressClass::Recovery,
+        ExecutionMode::Scheduled => IngressClass::Scheduled,
+        ExecutionMode::Manual => IngressClass::Manual,
+    }
+}
+
+fn chat_scope_for(event: &EventContext) -> ChatScope {
+    match event.chat.as_ref().map(|chat| chat.route_class()) {
+        Some(ChatRouteClass::Private) => ChatScope::Private,
+        Some(ChatRouteClass::GroupLike) => {
+            match event.chat.as_ref().map(|chat| chat.chat_type.as_str()) {
+                Some("group") => ChatScope::Group,
+                Some("supergroup") => ChatScope::Supergroup,
+                _ => ChatScope::Unknown,
+            }
+        }
+        Some(ChatRouteClass::Channel) => ChatScope::Channel,
+        _ => ChatScope::Unknown,
+    }
+}
+
+fn author_kind_for(event: &EventContext) -> AuthorKind {
+    match event.author_source_class() {
+        AuthorSourceClass::HumanAdmin => AuthorKind::HumanAdmin,
+        AuthorSourceClass::HumanMember => AuthorKind::HumanMember,
+        AuthorSourceClass::Bot => AuthorKind::Bot,
+        AuthorSourceClass::ChannelStyleNoSender => AuthorKind::ChannelIdentity,
+        AuthorSourceClass::Unknown => AuthorKind::System,
+    }
+}
+
+fn event_trait_for_update_type(update_type: UpdateType) -> EventTrait {
+    match update_type {
+        UpdateType::Message => EventTrait::Message,
+        UpdateType::EditedMessage => EventTrait::EditedMessage,
+        UpdateType::ChannelPost => EventTrait::ChannelPost,
+        UpdateType::EditedChannelPost => EventTrait::EditedChannelPost,
+        UpdateType::CallbackQuery => EventTrait::CallbackQuery,
+        UpdateType::ChatMember => EventTrait::ChatMember,
+        UpdateType::MyChatMember => EventTrait::MyChatMember,
+        UpdateType::JoinRequest => EventTrait::JoinRequest,
+        UpdateType::Job => EventTrait::Job,
+        UpdateType::System => EventTrait::System,
+    }
+}
+
+fn extract_command_name(event: &EventContext) -> Option<String> {
+    match event.command_source()? {
+        CommandSource::MessageText(text) | CommandSource::CallbackData(text) => {
+            parse_command_name(text)
+        }
+    }
+}
+
+fn parse_command_name(raw: &str) -> Option<String> {
+    let command = raw.trim().strip_prefix('/')?;
+    let token = command.split_whitespace().next()?;
+    let command_name = token.split('@').next().unwrap_or(token);
+    if command_name.is_empty()
+        || !command_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+
+    Some(command_name.to_ascii_lowercase())
+}
+
+fn push_unique<T>(items: &mut Vec<T>, item: T)
+where
+    T: PartialEq,
+{
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
+fn extend_unique<T>(items: &mut Vec<T>, iter: impl IntoIterator<Item = T>)
+where
+    T: PartialEq,
+{
+    for item in iter {
+        push_unique(items, item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AuthorKind, ChatScope, EventClassifier, EventTrait, ExecutionOutcome, ExecutionRouter,
+        IngressClass, RouteBucket, RoutingError,
+    };
+    use crate::event::{
+        CallbackContext, ChatContext, EventContext, EventNormalizer, ExecutionMode,
+        ManualInvocationInput, MessageContext, ScheduledJobInput, SenderContext, SystemContext,
+        TelegramUpdateInput, UnitContext, UpdateType,
+    };
+    use crate::moderation::{ModerationEngine, ModerationEventResult};
+    use crate::storage::Storage;
+    use crate::tg::TelegramGateway;
+    use crate::unit::{
+        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
+    };
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    fn ts() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 22, 12, 0, 0)
+            .single()
+            .expect("valid timestamp")
+    }
+
+    fn chat() -> ChatContext {
+        ChatContext {
+            id: -100123,
+            chat_type: "supergroup".to_owned(),
+            title: Some("Moderation HQ".to_owned()),
+            username: Some("mod_hq".to_owned()),
+            thread_id: Some(11),
+        }
+    }
+
+    fn private_chat() -> ChatContext {
+        ChatContext {
+            id: 42,
+            chat_type: "private".to_owned(),
+            title: None,
+            username: Some("dm_user".to_owned()),
+            thread_id: None,
+        }
+    }
+
+    fn admin_sender() -> SenderContext {
+        SenderContext {
+            id: 42,
+            username: Some("admin".to_owned()),
+            display_name: Some("Admin".to_owned()),
+            is_bot: false,
+            is_admin: true,
+            role: Some("owner".to_owned()),
+        }
+    }
+
+    fn manual_event(command_text: &str) -> EventContext {
+        let normalizer = EventNormalizer::new();
+        let mut input = ManualInvocationInput::new(
+            UnitContext::new("moderation.test").with_trigger("manual"),
+            command_text,
+        );
+        input.received_at = ts();
+        input.chat = Some(chat());
+        input.sender = Some(admin_sender());
+        normalizer
+            .normalize_manual(input)
+            .expect("manual event normalizes")
+    }
+
+    fn scheduled_event(command_text: &str) -> EventContext {
+        let normalizer = EventNormalizer::new();
+        let mut input = ScheduledJobInput::new(
+            "job_123",
+            UnitContext::new("moderation.test").with_trigger("schedule"),
+            json!({ "kind": "scheduled" }),
+            ts(),
+            ts(),
+        );
+        input.received_at = ts();
+        input.chat = Some(chat());
+        input.sender = Some(admin_sender());
+        input.command_text = Some(command_text.to_owned());
+        normalizer
+            .normalize_scheduled(input)
+            .expect("scheduled event normalizes")
+    }
+
+    fn callback_event(data: &str) -> EventContext {
+        let mut event = EventContext::new(
+            "evt_callback",
+            UpdateType::CallbackQuery,
+            ExecutionMode::Realtime,
+            SystemContext::realtime(),
+        );
+        event.update_id = Some(1001);
+        event.chat = Some(chat());
+        event.sender = Some(admin_sender());
+        event.callback = Some(CallbackContext {
+            query_id: "cbq-1".to_owned(),
+            data: Some(data.to_owned()),
+            message_id: Some(700),
+            origin_chat_id: Some(-100123),
+            from_user_id: 42,
+        });
+        event
+    }
+
+    fn realtime_text_event(text: &str) -> EventContext {
+        let mut input = TelegramUpdateInput::message(
+            1002,
+            chat(),
+            admin_sender(),
+            MessageContext {
+                id: 701,
+                date: ts(),
+                text: Some(text.to_owned()),
+                entities: vec![],
+                has_media: false,
+                file_ids: Vec::new(),
+                reply_to_message_id: None,
+                media_group_id: None,
+            },
+        );
+        input.received_at = ts();
+        EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("telegram event normalizes")
+    }
+
+    fn private_text_event(text: &str) -> EventContext {
+        let mut input = TelegramUpdateInput::message(
+            1003,
+            private_chat(),
+            admin_sender(),
+            MessageContext {
+                id: 702,
+                date: ts(),
+                text: Some(text.to_owned()),
+                entities: vec![],
+                has_media: false,
+                file_ids: Vec::new(),
+                reply_to_message_id: None,
+                media_group_id: None,
+            },
+        );
+        input.received_at = ts();
+        EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("private telegram event normalizes")
+    }
+
+    fn linked_channel_style_group_event() -> EventContext {
+        let mut event = EventContext::new(
+            "evt_linked_channel_style",
+            UpdateType::Message,
+            ExecutionMode::Realtime,
+            SystemContext::realtime(),
+        );
+        event.update_id = Some(1004);
+        event.chat = Some(chat());
+        event.message = Some(MessageContext {
+            id: 703,
+            date: ts(),
+            text: Some("channel-style post".to_owned()),
+            entities: vec![],
+            has_media: false,
+            file_ids: Vec::new(),
+            reply_to_message_id: None,
+            media_group_id: None,
+        });
+        event
+    }
+
+    fn registry_with_caps(caps: &[&str]) -> UnitRegistry {
+        let mut manifest = UnitManifest::new(
+            UnitDefinition::new("moderation.test"),
+            TriggerSpec::command(["warn", "mute", "ban", "del", "undo", "msg"]),
+            ServiceSpec::new("scripts/moderation/test.rhai"),
+        );
+        manifest.capabilities = CapabilitiesSpec {
+            allow: caps.iter().map(|value| (*value).to_owned()).collect(),
+            deny: Vec::new(),
+        };
+        UnitRegistry::load_manifests(vec![manifest]).registry
+    }
+
+    fn router_with_moderation() -> ExecutionRouter {
+        let dir = tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("runtime.sqlite3"))
+            .bootstrap()
+            .expect("bootstrap")
+            .into_connection();
+        let gateway = TelegramGateway::new(false);
+        let engine = ModerationEngine::new(storage, gateway)
+            .with_unit_registry(registry_with_caps(&[]))
+            .with_admin_user_ids([42]);
+        ExecutionRouter::new().with_moderation(engine)
+    }
+
+    #[test]
+    fn classifier_marks_manual_command_reply_traits() {
+        let classifier = EventClassifier::new();
+        let mut event = manual_event("/warn @spam spam");
+        event.reply = Some(crate::event::ReplyContext {
+            message_id: 900,
+            sender_user_id: Some(99),
+            sender_username: Some("spam".to_owned()),
+            text: Some("spam".to_owned()),
+            has_media: false,
+        });
+        event.message = event.message.map(|message| message.with_reply(Some(900)));
+
+        let classified = classifier.classify(&event);
+
+        assert_eq!(classified.ingress_class, IngressClass::Manual);
+        assert_eq!(classified.command_name.as_deref(), Some("warn"));
+        assert!(classified.traits.contains(&EventTrait::System));
+        assert!(classified.traits.contains(&EventTrait::Text));
+        assert!(classified.traits.contains(&EventTrait::Command));
+        assert!(classified.traits.contains(&EventTrait::Reply));
+    }
+
+    #[test]
+    fn classifier_marks_scheduled_job_and_command() {
+        let classifier = EventClassifier::new();
+        let classified = classifier.classify(&scheduled_event("/mute @spam 1h"));
+
+        assert_eq!(classified.ingress_class, IngressClass::Scheduled);
+        assert_eq!(classified.command_name.as_deref(), Some("mute"));
+        assert!(classified.traits.contains(&EventTrait::Job));
+        assert!(classified.traits.contains(&EventTrait::Text));
+        assert!(classified.traits.contains(&EventTrait::Command));
+    }
+
+    #[test]
+    fn classifier_marks_callback_command_bucket() {
+        let classifier = EventClassifier::new();
+        let classified = classifier.classify(&callback_event("/undo"));
+
+        assert_eq!(classified.ingress_class, IngressClass::Realtime);
+        assert_eq!(classified.command_name.as_deref(), Some("undo"));
+        assert!(classified.traits.contains(&EventTrait::CallbackQuery));
+        assert!(classified.traits.contains(&EventTrait::CallbackData));
+        assert!(classified.traits.contains(&EventTrait::Command));
+    }
+
+    #[test]
+    fn classifier_marks_private_chat_scope_and_human_admin_author() {
+        let classifier = EventClassifier::new();
+        let classified = classifier.classify(&private_text_event("hello"));
+
+        assert_eq!(classified.chat_scope, ChatScope::Private);
+        assert_eq!(classified.author_kind, AuthorKind::HumanAdmin);
+        assert!(classified.traits.contains(&EventTrait::Message));
+        assert!(classified.traits.contains(&EventTrait::Text));
+    }
+
+    #[test]
+    fn classifier_marks_linked_channel_style_approximation() {
+        let classifier = EventClassifier::new();
+        let classified = classifier.classify(&linked_channel_style_group_event());
+
+        assert_eq!(classified.chat_scope, ChatScope::Supergroup);
+        assert_eq!(classified.author_kind, AuthorKind::ChannelIdentity);
+        assert!(classified.traits.contains(&EventTrait::LinkedChannelStyle));
+        assert!(classified.traits.contains(&EventTrait::Message));
+    }
+
+    #[test]
+    fn router_plan_tracks_buckets_for_non_command_text() {
+        let router = ExecutionRouter::new();
+        let plan = router.plan(&realtime_text_event("hello"));
+
+        assert!(plan
+            .matched_buckets
+            .contains(&RouteBucket::IngressClass(IngressClass::Realtime)));
+        assert!(plan
+            .matched_buckets
+            .contains(&RouteBucket::ChatScope(ChatScope::Supergroup)));
+        assert!(plan
+            .matched_buckets
+            .contains(&RouteBucket::AuthorKind(AuthorKind::HumanAdmin)));
+        assert!(plan
+            .matched_buckets
+            .contains(&RouteBucket::EventTrait(EventTrait::Message)));
+        assert!(plan
+            .matched_buckets
+            .contains(&RouteBucket::EventTrait(EventTrait::Text)));
+        assert!(plan.lanes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn router_executes_built_in_moderation_for_indexed_command() {
+        let router = router_with_moderation();
+        let mut event = manual_event("/warn @spam spam");
+        event.reply = Some(crate::event::ReplyContext {
+            message_id: 900,
+            sender_user_id: Some(99),
+            sender_username: Some("spam".to_owned()),
+            text: Some("spam".to_owned()),
+            has_media: false,
+        });
+        event.message = event.message.map(|message| message.with_reply(Some(900)));
+
+        let outcome = router.route(&event).await.expect("routing succeeds");
+
+        let ExecutionOutcome::BuiltInModeration { plan, result } = outcome else {
+            panic!("expected built-in moderation outcome");
+        };
+        assert!(plan
+            .matched_buckets
+            .contains(&RouteBucket::CommandIndex("warn".to_owned())));
+        assert!(matches!(result, ModerationEventResult::Executed(_)));
+    }
+
+    #[tokio::test]
+    async fn router_reports_missing_executor_for_indexed_lane() {
+        let router = ExecutionRouter::new();
+        let mut event = manual_event("/warn @spam spam");
+        event.reply = Some(crate::event::ReplyContext {
+            message_id: 900,
+            sender_user_id: Some(99),
+            sender_username: Some("spam".to_owned()),
+            text: Some("spam".to_owned()),
+            has_media: false,
+        });
+        event.message = event.message.map(|message| message.with_reply(Some(900)));
+
+        let error = router.route(&event).await.expect_err("missing executor must fail");
+
+        assert!(matches!(
+            error,
+            RoutingError::MissingLaneExecutor { .. }
+        ));
+    }
+}

@@ -6,6 +6,7 @@ pub mod host_api;
 pub mod moderation;
 pub mod observability;
 pub mod parser;
+pub mod router;
 pub mod scheduler;
 pub mod shutdown;
 pub mod storage;
