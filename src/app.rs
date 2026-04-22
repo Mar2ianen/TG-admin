@@ -196,6 +196,7 @@ mod tests {
         assert_eq!(summary.registry.total_units, 0);
         assert!(summary.polling);
         assert!(!summary.router_ready);
+        assert_eq!(summary.indexed_command_routes, 0);
     }
 
     #[test]
@@ -273,6 +274,7 @@ mod tests {
         let summary = app.runtime.summary();
         assert!(summary.router_ready);
         assert_eq!(summary.transport_name, "noop");
+        assert_eq!(summary.indexed_command_routes, 6);
         assert!(app.runtime.host_api().is_some());
         assert!(app.runtime.router().is_some());
     }

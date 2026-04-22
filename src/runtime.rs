@@ -2,7 +2,7 @@ use crate::audit::AuditService;
 use crate::config::AppConfig;
 use crate::host_api::HostApi;
 use crate::moderation::ModerationEngine;
-use crate::router::ExecutionRouter;
+use crate::router::{ExecutionRouter, RouterIndex};
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
 use crate::tg::TelegramGateway;
@@ -48,7 +48,9 @@ impl Runtime {
         let moderation = ModerationEngine::new(moderation_storage, self.services.telegram.clone())
             .with_unit_registry_handle(registry_handle)
             .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied());
-        let router = ExecutionRouter::new().with_moderation(moderation);
+        let router = ExecutionRouter::new()
+            .with_index(RouterIndex::from_registry(&self.registry))
+            .with_moderation(moderation);
 
         self.execution = RuntimeExecution {
             host_api: Some(host_api),
@@ -59,6 +61,12 @@ impl Runtime {
     }
 
     pub fn summary(&self) -> RuntimeSummary<'_> {
+        let index_stats = self
+            .execution
+            .router
+            .as_ref()
+            .map(ExecutionRouter::index_stats)
+            .unwrap_or_default();
         RuntimeSummary {
             database_path: self.services.storage.database_path(),
             registry: self.registry.status_summary(),
@@ -73,6 +81,8 @@ impl Runtime {
                 .unwrap_or(false),
             transport_name: self.services.telegram.transport_name(),
             router_ready: self.execution.router.is_some(),
+            indexed_trait_routes: index_stats.trait_routes,
+            indexed_command_routes: index_stats.command_routes,
         }
     }
 
@@ -133,5 +143,6 @@ pub struct RuntimeSummary<'a> {
     pub host_api_dry_run: bool,
     pub transport_name: &'static str,
     pub router_ready: bool,
+    pub indexed_trait_routes: usize,
+    pub indexed_command_routes: usize,
 }
-

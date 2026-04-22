@@ -5,6 +5,7 @@ use crate::event::{
     MessageContentKind, UpdateType,
 };
 use crate::moderation::{ModerationEngine, ModerationError, ModerationEventResult};
+use crate::unit::{TriggerSpec, UnitEventType, UnitRegistry, UnitStatus};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct EventClassifier;
@@ -148,6 +149,7 @@ pub struct ClassifiedEvent {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ExecutionLane {
     BuiltInModeration,
+    UnitDispatch,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
@@ -203,6 +205,43 @@ impl RouterIndex {
                 vec![ExecutionLane::BuiltInModeration],
             );
         }
+        index
+    }
+
+    pub fn from_registry(registry: &UnitRegistry) -> Self {
+        let mut index = Self::with_builtin_moderation_commands();
+
+        for descriptor in registry.entries() {
+            if matches!(descriptor.status, UnitStatus::Failed | UnitStatus::Disabled) {
+                continue;
+            }
+            let Some(manifest) = descriptor.manifest.as_ref() else {
+                continue;
+            };
+
+            match &manifest.trigger {
+                TriggerSpec::Command { commands } => {
+                    for command in commands {
+                        index = index.register_command_lane(
+                            command.trim().to_ascii_lowercase(),
+                            ExecutionLane::UnitDispatch,
+                        );
+                    }
+                }
+                TriggerSpec::Regex { .. } => {
+                    index = index.register_trait_lane(EventTrait::Text, ExecutionLane::UnitDispatch);
+                }
+                TriggerSpec::EventType { events } => {
+                    for event in events {
+                        index = index.register_trait_lane(
+                            event_trait_for_unit_event(*event),
+                            ExecutionLane::UnitDispatch,
+                        );
+                    }
+                }
+            }
+        }
+
         index
     }
 
@@ -287,6 +326,16 @@ impl RouterIndex {
             lanes,
         }
     }
+
+    pub fn stats(&self) -> RouterIndexStats {
+        RouterIndexStats {
+            ingress_routes: self.ingress_index.len(),
+            chat_scope_routes: self.chat_scope_index.len(),
+            author_routes: self.author_index.len(),
+            trait_routes: self.trait_index.len(),
+            command_routes: self.command_index.len(),
+        }
+    }
 }
 
 impl Default for RouterIndex {
@@ -325,6 +374,10 @@ impl ExecutionRouter {
         self.index.plan(self.classifier.classify(event))
     }
 
+    pub fn index_stats(&self) -> RouterIndexStats {
+        self.index.stats()
+    }
+
     pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
         let plan = self.plan(event);
 
@@ -337,6 +390,10 @@ impl ExecutionRouter {
                 })?;
             let result = moderation.handle_event(event).await?;
             return Ok(ExecutionOutcome::BuiltInModeration { plan, result });
+        }
+
+        if plan.lanes.contains(&ExecutionLane::UnitDispatch) {
+            return Ok(ExecutionOutcome::Unhandled(plan));
         }
 
         Ok(ExecutionOutcome::Unhandled(plan))
@@ -381,6 +438,15 @@ pub enum ExecutionOutcome {
         result: ModerationEventResult,
     },
     Unhandled(RoutePlan),
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct RouterIndexStats {
+    pub ingress_routes: usize,
+    pub chat_scope_routes: usize,
+    pub author_routes: usize,
+    pub trait_routes: usize,
+    pub command_routes: usize,
 }
 
 fn ingress_class_for(mode: ExecutionMode) -> IngressClass {
@@ -455,6 +521,14 @@ fn event_trait_for_content_kind(content_kind: MessageContentKind) -> EventTrait 
     }
 }
 
+fn event_trait_for_unit_event(event_type: UnitEventType) -> EventTrait {
+    match event_type {
+        UnitEventType::Message => EventTrait::Message,
+        UnitEventType::CallbackQuery => EventTrait::CallbackQuery,
+        UnitEventType::Job => EventTrait::Job,
+    }
+}
+
 fn extract_command_name(event: &EventContext) -> Option<String> {
     match event.command_source()? {
         CommandSource::MessageText(text) | CommandSource::CallbackData(text) => {
@@ -499,8 +573,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthorKind, ChatScope, EventClassifier, EventTrait, ExecutionOutcome, ExecutionRouter,
-        IngressClass, RouteBucket, RoutingError,
+        AuthorKind, ChatScope, EventClassifier, EventTrait, ExecutionLane, ExecutionOutcome,
+        ExecutionRouter, IngressClass, RouteBucket, RouterIndex, RoutingError,
     };
     use crate::event::{
         CallbackContext, ChatContext, EventContext, EventNormalizer, ExecutionMode,
@@ -511,7 +585,8 @@ mod tests {
     use crate::storage::Storage;
     use crate::tg::TelegramGateway;
     use crate::unit::{
-        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
+        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitEventType, UnitManifest,
+        UnitRegistry,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
@@ -686,6 +761,10 @@ mod tests {
             deny: Vec::new(),
         };
         UnitRegistry::load_manifests(vec![manifest]).registry
+    }
+
+    fn registry_from_manifests(manifests: Vec<UnitManifest>) -> UnitRegistry {
+        UnitRegistry::load_manifests(manifests).registry
     }
 
     fn router_with_moderation() -> ExecutionRouter {
@@ -870,6 +949,46 @@ mod tests {
             .matched_buckets
             .contains(&RouteBucket::EventTrait(EventTrait::Text)));
         assert!(plan.lanes.is_empty());
+    }
+
+    #[test]
+    fn router_index_builds_unit_dispatch_routes_from_registry_triggers() {
+        let command_manifest = UnitManifest::new(
+            UnitDefinition::new("command.stats.unit"),
+            TriggerSpec::command(["stats"]),
+            ServiceSpec::new("scripts/command/stats.rhai"),
+        );
+        let callback_manifest = UnitManifest::new(
+            UnitDefinition::new("callback.resolve.unit"),
+            TriggerSpec::event_type([UnitEventType::CallbackQuery]),
+            ServiceSpec::new("scripts/callback/resolve.rhai"),
+        );
+        let regex_manifest = UnitManifest::new(
+            UnitDefinition::new("message.link_filter.unit"),
+            TriggerSpec::regex("https?://"),
+            ServiceSpec::new("scripts/message/link_filter.rhai"),
+        );
+        let index = RouterIndex::from_registry(&registry_from_manifests(vec![
+            command_manifest,
+            callback_manifest,
+            regex_manifest,
+        ]));
+        let stats = index.stats();
+
+        assert!(stats.command_routes >= 7);
+        assert!(stats.trait_routes >= 2);
+
+        let command_plan = index.plan(EventClassifier::new().classify(&manual_event("/stats")));
+        assert!(command_plan.lanes.contains(&ExecutionLane::UnitDispatch));
+        assert!(command_plan
+            .matched_buckets
+            .contains(&RouteBucket::CommandIndex("stats".to_owned())));
+
+        let callback_plan = index.plan(EventClassifier::new().classify(&callback_event("resolve")));
+        assert!(callback_plan
+            .matched_buckets
+            .contains(&RouteBucket::EventTrait(EventTrait::CallbackQuery)));
+        assert!(callback_plan.lanes.contains(&ExecutionLane::UnitDispatch));
     }
 
     #[tokio::test]
