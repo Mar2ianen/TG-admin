@@ -983,47 +983,31 @@ fn to_teloxide_parse_mode(parse_mode: ParseMode) -> Option<TeloxideParseMode> {
 fn to_teloxide_permissions(permissions: &TelegramPermissions) -> TeloxideChatPermissions {
     let mut mapped = TeloxideChatPermissions::empty();
 
-    if permissions.can_send_messages.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_MESSAGES;
+    macro_rules! map_perms {
+        ($($field:ident => $flag:ident),+ $(,)?) => {
+            $(
+                if permissions.$field.unwrap_or(false) {
+                    mapped |= TeloxideChatPermissions::$flag;
+                }
+            )+
+        };
     }
-    if permissions.can_send_audios.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_AUDIOS;
-    }
-    if permissions.can_send_documents.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_DOCUMENTS;
-    }
-    if permissions.can_send_photos.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_PHOTOS;
-    }
-    if permissions.can_send_videos.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_VIDEOS;
-    }
-    if permissions.can_send_video_notes.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_VIDEO_NOTES;
-    }
-    if permissions.can_send_voice_notes.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_VOICE_NOTES;
-    }
-    if permissions.can_send_polls.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_POLLS;
-    }
-    if permissions.can_send_other_messages.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::SEND_OTHER_MESSAGES;
-    }
-    if permissions.can_add_web_page_previews.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::ADD_WEB_PAGE_PREVIEWS;
-    }
-    if permissions.can_change_info.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::CHANGE_INFO;
-    }
-    if permissions.can_invite_users.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::INVITE_USERS;
-    }
-    if permissions.can_pin_messages.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::PIN_MESSAGES;
-    }
-    if permissions.can_manage_topics.unwrap_or(false) {
-        mapped |= TeloxideChatPermissions::MANAGE_TOPICS;
+
+    map_perms! {
+        can_send_messages => SEND_MESSAGES,
+        can_send_audios => SEND_AUDIOS,
+        can_send_documents => SEND_DOCUMENTS,
+        can_send_photos => SEND_PHOTOS,
+        can_send_videos => SEND_VIDEOS,
+        can_send_video_notes => SEND_VIDEO_NOTES,
+        can_send_voice_notes => SEND_VOICE_NOTES,
+        can_send_polls => SEND_POLLS,
+        can_send_other_messages => SEND_OTHER_MESSAGES,
+        can_add_web_page_previews => ADD_WEB_PAGE_PREVIEWS,
+        can_change_info => CHANGE_INFO,
+        can_invite_users => INVITE_USERS,
+        can_pin_messages => PIN_MESSAGES,
+        can_manage_topics => MANAGE_TOPICS,
     }
 
     mapped
