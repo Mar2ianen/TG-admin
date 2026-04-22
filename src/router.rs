@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::event::{
-    AuthorSourceClass, ChatRouteClass, CommandSource, EventContext, ExecutionMode, UpdateType,
+    AuthorSourceClass, ChatRouteClass, CommandSource, EventContext, ExecutionMode,
+    MessageContentKind, UpdateType,
 };
 use crate::moderation::{ModerationEngine, ModerationError, ModerationEventResult};
 
@@ -36,6 +37,12 @@ impl EventClassifier {
         }
         if event.message.as_ref().is_some_and(|message| message.has_media) {
             push_unique(&mut traits, EventTrait::Media);
+        }
+        if let Some(content_kind) = event.message.as_ref().and_then(|message| message.content_kind) {
+            push_unique(&mut traits, event_trait_for_content_kind(content_kind));
+            if !matches!(content_kind, MessageContentKind::Text) {
+                push_unique(&mut traits, EventTrait::Media);
+            }
         }
         if event
             .message
@@ -100,6 +107,23 @@ pub enum EventTrait {
     MediaGroup,
     CallbackData,
     LinkedChannelStyle,
+    Photo,
+    Voice,
+    Video,
+    Audio,
+    Document,
+    Sticker,
+    Animation,
+    VideoNote,
+    Contact,
+    Location,
+    Poll,
+    Dice,
+    Venue,
+    Game,
+    Invoice,
+    Story,
+    UnknownMedia,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -408,6 +432,29 @@ fn event_trait_for_update_type(update_type: UpdateType) -> EventTrait {
     }
 }
 
+fn event_trait_for_content_kind(content_kind: MessageContentKind) -> EventTrait {
+    match content_kind {
+        MessageContentKind::Text => EventTrait::Text,
+        MessageContentKind::Photo => EventTrait::Photo,
+        MessageContentKind::Voice => EventTrait::Voice,
+        MessageContentKind::Video => EventTrait::Video,
+        MessageContentKind::Audio => EventTrait::Audio,
+        MessageContentKind::Document => EventTrait::Document,
+        MessageContentKind::Sticker => EventTrait::Sticker,
+        MessageContentKind::Animation => EventTrait::Animation,
+        MessageContentKind::VideoNote => EventTrait::VideoNote,
+        MessageContentKind::Contact => EventTrait::Contact,
+        MessageContentKind::Location => EventTrait::Location,
+        MessageContentKind::Poll => EventTrait::Poll,
+        MessageContentKind::Dice => EventTrait::Dice,
+        MessageContentKind::Venue => EventTrait::Venue,
+        MessageContentKind::Game => EventTrait::Game,
+        MessageContentKind::Invoice => EventTrait::Invoice,
+        MessageContentKind::Story => EventTrait::Story,
+        MessageContentKind::UnknownMedia => EventTrait::UnknownMedia,
+    }
+}
+
 fn extract_command_name(event: &EventContext) -> Option<String> {
     match event.command_source()? {
         CommandSource::MessageText(text) | CommandSource::CallbackData(text) => {
@@ -457,8 +504,8 @@ mod tests {
     };
     use crate::event::{
         CallbackContext, ChatContext, EventContext, EventNormalizer, ExecutionMode,
-        ManualInvocationInput, MessageContext, ScheduledJobInput, SenderContext, SystemContext,
-        TelegramUpdateInput, UnitContext, UpdateType,
+        ManualInvocationInput, MessageContentKind, MessageContext, ScheduledJobInput,
+        SenderContext, SystemContext, TelegramUpdateInput, UnitContext, UpdateType,
     };
     use crate::moderation::{ModerationEngine, ModerationEventResult};
     use crate::storage::Storage;
@@ -568,6 +615,7 @@ mod tests {
                 id: 701,
                 date: ts(),
                 text: Some(text.to_owned()),
+                content_kind: Some(MessageContentKind::Text),
                 entities: vec![],
                 has_media: false,
                 file_ids: Vec::new(),
@@ -590,6 +638,7 @@ mod tests {
                 id: 702,
                 date: ts(),
                 text: Some(text.to_owned()),
+                content_kind: Some(MessageContentKind::Text),
                 entities: vec![],
                 has_media: false,
                 file_ids: Vec::new(),
@@ -616,6 +665,7 @@ mod tests {
             id: 703,
             date: ts(),
             text: Some("channel-style post".to_owned()),
+            content_kind: Some(MessageContentKind::Text),
             entities: vec![],
             has_media: false,
             file_ids: Vec::new(),
@@ -718,6 +768,85 @@ mod tests {
         assert_eq!(classified.author_kind, AuthorKind::ChannelIdentity);
         assert!(classified.traits.contains(&EventTrait::LinkedChannelStyle));
         assert!(classified.traits.contains(&EventTrait::Message));
+    }
+
+    #[test]
+    fn classifier_marks_voice_bucket_when_content_kind_is_voice() {
+        let classifier = EventClassifier::new();
+        let mut event = realtime_text_event("");
+        event.message = Some(MessageContext {
+            id: 704,
+            date: ts(),
+            text: None,
+            content_kind: Some(MessageContentKind::Voice),
+            entities: vec![],
+            has_media: true,
+            file_ids: vec!["voice-file".to_owned()],
+            reply_to_message_id: None,
+            media_group_id: None,
+        });
+
+        let classified = classifier.classify(&event);
+
+        assert!(classified.traits.contains(&EventTrait::Voice));
+        assert!(classified.traits.contains(&EventTrait::Media));
+        assert!(!classified.traits.contains(&EventTrait::Text));
+    }
+
+    #[test]
+    fn classifier_maps_every_message_content_kind_to_its_bucket() {
+        let cases = [
+            (MessageContentKind::Text, EventTrait::Text, false),
+            (MessageContentKind::Photo, EventTrait::Photo, true),
+            (MessageContentKind::Voice, EventTrait::Voice, true),
+            (MessageContentKind::Video, EventTrait::Video, true),
+            (MessageContentKind::Audio, EventTrait::Audio, true),
+            (MessageContentKind::Document, EventTrait::Document, true),
+            (MessageContentKind::Sticker, EventTrait::Sticker, true),
+            (MessageContentKind::Animation, EventTrait::Animation, true),
+            (MessageContentKind::VideoNote, EventTrait::VideoNote, true),
+            (MessageContentKind::Contact, EventTrait::Contact, true),
+            (MessageContentKind::Location, EventTrait::Location, true),
+            (MessageContentKind::Poll, EventTrait::Poll, true),
+            (MessageContentKind::Dice, EventTrait::Dice, true),
+            (MessageContentKind::Venue, EventTrait::Venue, true),
+            (MessageContentKind::Game, EventTrait::Game, true),
+            (MessageContentKind::Invoice, EventTrait::Invoice, true),
+            (MessageContentKind::Story, EventTrait::Story, true),
+            (
+                MessageContentKind::UnknownMedia,
+                EventTrait::UnknownMedia,
+                true,
+            ),
+        ];
+        let classifier = EventClassifier::new();
+
+        for (content_kind, expected_trait, expects_media_trait) in cases {
+            let mut event = realtime_text_event("");
+            event.message = Some(MessageContext {
+                id: 900,
+                date: ts(),
+                text: matches!(content_kind, MessageContentKind::Text).then(|| "hello".to_owned()),
+                content_kind: Some(content_kind),
+                entities: vec![],
+                has_media: expects_media_trait,
+                file_ids: Vec::new(),
+                reply_to_message_id: None,
+                media_group_id: None,
+            });
+
+            let classified = classifier.classify(&event);
+
+            assert!(
+                classified.traits.contains(&expected_trait),
+                "expected trait {expected_trait:?} for {content_kind:?}"
+            );
+            assert_eq!(
+                classified.traits.contains(&EventTrait::Media),
+                expects_media_trait,
+                "unexpected media trait state for {content_kind:?}"
+            );
+        }
     }
 
     #[test]

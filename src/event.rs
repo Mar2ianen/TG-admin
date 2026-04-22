@@ -550,6 +550,7 @@ pub struct MessageContext {
     pub id: i32,
     pub date: DateTime<Utc>,
     pub text: Option<String>,
+    pub content_kind: Option<MessageContentKind>,
     pub entities: Vec<String>,
     pub has_media: bool,
     pub file_ids: Vec<String>,
@@ -563,6 +564,7 @@ impl MessageContext {
             id: 0,
             date: at,
             text: Some(text.into()),
+            content_kind: None,
             entities: Vec::new(),
             has_media: false,
             file_ids: Vec::new(),
@@ -575,6 +577,29 @@ impl MessageContext {
         self.reply_to_message_id = reply_to_message_id;
         self
     }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageContentKind {
+    Text,
+    Photo,
+    Voice,
+    Video,
+    Audio,
+    Document,
+    Sticker,
+    Animation,
+    VideoNote,
+    Contact,
+    Location,
+    Poll,
+    Dice,
+    Venue,
+    Game,
+    Invoice,
+    Story,
+    UnknownMedia,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -759,9 +784,9 @@ fn validate_telegram_shape(input: &TelegramUpdateInput) -> Result<(), EventNorma
 mod tests {
     use super::{
         CallbackContext, ChatContext, CommandSource, EventContext, EventNormalizationError,
-        EventNormalizer, ExecutionMode, ManualInvocationInput, MessageContext, ReplyContext,
-        ScheduledJobInput, SenderContext, SystemContext, SystemOrigin, TelegramUpdateInput,
-        UnitContext, UpdateType,
+        EventNormalizer, ExecutionMode, ManualInvocationInput, MessageContentKind, MessageContext,
+        ReplyContext, ScheduledJobInput, SenderContext, SystemContext, SystemOrigin,
+        TelegramUpdateInput, UnitContext, UpdateType,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::json;
@@ -798,6 +823,7 @@ mod tests {
             id: 777,
             date: ts(),
             text: Some(text.to_owned()),
+            content_kind: Some(MessageContentKind::Text),
             entities: vec!["bot_command".to_owned()],
             has_media: false,
             file_ids: Vec::new(),
@@ -945,6 +971,7 @@ mod tests {
     "id": 0,
     "date": "2026-04-21T09:30:00Z",
     "text": "/warn @spam spam",
+    "content_kind": null,
     "entities": [],
     "has_media": false,
     "file_ids": [],

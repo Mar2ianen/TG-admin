@@ -711,7 +711,8 @@ mod tests {
         command_name_from_ast,
     };
     use crate::event::{
-        EventContext, ExecutionMode, MessageContext, ReplyContext, SystemContext, UpdateType,
+        EventContext, ExecutionMode, MessageContentKind, MessageContext, ReplyContext,
+        SystemContext, UpdateType,
     };
     use crate::parser::duration::DurationUnit;
     use crate::parser::target::{ParsedTargetSelector, TargetSource};
@@ -729,6 +730,7 @@ mod tests {
             id: 101,
             date: Utc::now(),
             text: Some("/cmd".to_owned()),
+            content_kind: Some(MessageContentKind::Text),
             entities: Vec::new(),
             has_media: false,
             file_ids: Vec::new(),
@@ -756,6 +758,7 @@ mod tests {
             id: 101,
             date: Utc::now(),
             text: Some("/cmd".to_owned()),
+            content_kind: Some(MessageContentKind::Text),
             entities: Vec::new(),
             has_media: false,
             file_ids: Vec::new(),

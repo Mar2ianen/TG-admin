@@ -1,8 +1,8 @@
 use chrono::Utc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use telegram_moderation_os::event::{
-    ChatContext, EventNormalizer, ExecutionMode, MessageContext, SenderContext, SystemContext,
-    UpdateType,
+    ChatContext, EventNormalizer, ExecutionMode, MessageContentKind, MessageContext,
+    SenderContext, SystemContext, UpdateType,
 };
 use telegram_moderation_os::parser::command::CommandParser;
 use telegram_moderation_os::parser::dispatch::EventCommandDispatcher;
@@ -60,6 +60,7 @@ fn bench_event_normalize(c: &mut Criterion) {
         id: 777,
         date: Utc::now(),
         text: Some("/warn @bad 2.8".to_owned()),
+        content_kind: Some(MessageContentKind::Text),
         entities: vec!["bot_command".to_owned()],
         has_media: false,
         file_ids: vec![],
@@ -133,6 +134,7 @@ fn dummy_event() -> telegram_moderation_os::event::EventContext {
         id: 101,
         date: Utc::now(),
         text: Some("/warn @user 2.8".to_owned()),
+        content_kind: Some(MessageContentKind::Text),
         entities: vec!["bot_command".to_owned()],
         has_media: false,
         file_ids: vec![],

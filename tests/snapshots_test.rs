@@ -1,8 +1,8 @@
 use chrono::Utc;
 use std::fs;
 use telegram_moderation_os::event::{
-    ChatContext, EventNormalizer, ExecutionMode, MessageContext, SenderContext, SystemContext,
-    UpdateType,
+    ChatContext, EventNormalizer, ExecutionMode, MessageContentKind, MessageContext,
+    SenderContext, SystemContext, UpdateType,
 };
 use telegram_moderation_os::parser::command::CommandParser;
 use telegram_moderation_os::parser::dispatch::EventCommandDispatcher;
@@ -20,6 +20,7 @@ fn realtime_event() -> telegram_moderation_os::event::EventContext {
         id: 101,
         date: Utc::now(),
         text: Some("/cmd".to_owned()),
+        content_kind: Some(MessageContentKind::Text),
         entities: vec!["bot_command".to_owned()],
         has_media: false,
         file_ids: vec![],
@@ -138,6 +139,7 @@ fn event_context_snapshot() {
             id: 777,
             date: Utc::now(),
             text: Some("/warn @spam 2.8".to_owned()),
+            content_kind: Some(MessageContentKind::Text),
             entities: vec!["bot_command".to_owned()],
             has_media: false,
             file_ids: vec![],

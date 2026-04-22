@@ -281,6 +281,7 @@ mod tests {
                 id: 777,
                 date: ts(),
                 text: Some("button".to_owned()),
+                content_kind: Some(crate::event::MessageContentKind::Text),
                 entities: Vec::new(),
                 has_media: false,
                 file_ids: Vec::new(),

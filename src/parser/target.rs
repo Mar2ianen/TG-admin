@@ -202,7 +202,8 @@ mod tests {
         TargetSelectorParser, TargetSource,
     };
     use crate::event::{
-        EventContext, ExecutionMode, MessageContext, ReplyContext, SystemContext, UpdateType,
+        EventContext, ExecutionMode, MessageContentKind, MessageContext, ReplyContext,
+        SystemContext, UpdateType,
     };
     use chrono::Utc;
     use serde_json::json;
@@ -272,6 +273,7 @@ mod tests {
             id: 77,
             date: Utc::now(),
             text: Some("/del".to_owned()),
+            content_kind: Some(MessageContentKind::Text),
             entities: Vec::new(),
             has_media: false,
             file_ids: Vec::new(),
