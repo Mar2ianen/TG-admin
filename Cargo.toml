@@ -1,0 +1,94 @@
+[package]
+name = "telegram-moderation-os"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Mikhail"]
+description = "Unit-based Telegram moderation runtime: Rust core + Rhai VM"
+license = "MIT"
+publish = false
+
+[features]
+default = ["hot-reload", "semantic", "bloom-prefilter"]
+hot-reload = ["dep:notify", "dep:arc-swap"]
+semantic = ["dep:sqlite-vec"]
+bloom-prefilter = ["dep:fastbloom"]
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+    "fs",
+    "process",
+] }
+async-trait = "0.1"
+futures = "0.3"
+teloxide-core = { version = "0.13", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+aho-corasick = "1.1"
+fastbloom = { version = "0.17", optional = true }
+rhai = { version = "1.24", features = ["sync", "serde", "internals", "metadata"] }
+tera = "1"
+moka = { version = "0.12", features = ["future"] }
+rusqlite = { version = "0.37", features = [
+    "bundled",
+    "backup",
+    "blob",
+    "functions",
+    "load_extension",
+    "modern_sqlite",
+    "serde_json",
+    "trace",
+] }
+libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+sqlite-vec = { version = "0.1.9", optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "gzip",
+    "brotli",
+    "http2",
+] }
+url = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+notify = { version = "8", optional = true }
+arc-swap = { version = "1.8", optional = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
+smallvec = "1"
+once_cell = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+proptest = "1"
+fastrand = "2"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+strip = true
+
+[profile.release.package.rhai]
+opt-level = 3
+
+[profile.dev]
+debug = 1

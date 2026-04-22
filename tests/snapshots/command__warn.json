@@ -1,0 +1,28 @@
+{
+  "command": {
+    "Warn": {
+      "name": "Warn",
+      "target": {
+        "selector": {
+          "Username": {
+            "username": "spam_user"
+          }
+        },
+        "source": "ExplicitPositional"
+      },
+      "reason": {
+        "RuleCode": "2.8"
+      },
+      "flags": {
+        "silent": false,
+        "public_notice": false,
+        "delete_history": false,
+        "dry_run": false,
+        "force": false
+      }
+    }
+  },
+  "pipe": null,
+  "execution_mode": "realtime",
+  "synthetic": false
+}
