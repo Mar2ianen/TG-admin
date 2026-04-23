@@ -64,10 +64,10 @@ impl Runtime {
                 .with_index(RouterIndex::from_registry(&self.registry))
                 .with_moderation(moderation),
         );
-        let ingress = self
-            .services
-            .polling_bot()
-            .map(|bot| IngressPipeline::new(bot, ingress_storage, router.clone()));
+        let ingress = self.services.polling_bot().map(|bot| {
+            IngressPipeline::new(bot, ingress_storage, router.clone())
+                .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
+        });
 
         self.execution = RuntimeExecution {
             host_api: Some(host_api),

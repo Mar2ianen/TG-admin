@@ -6,8 +6,8 @@ use serde_json::json;
 use teloxide_core::payloads::GetUpdatesSetters;
 use teloxide_core::prelude::{Request, Requester};
 use teloxide_core::types::{
-    AllowedUpdate, CallbackQuery, Chat, ChatKind, MediaKind, Message, MessageKind,
-    PublicChatKind, Update, UpdateKind, User,
+    AllowedUpdate, CallbackQuery, Chat, ChatKind, MediaKind, Message, MessageKind, PublicChatKind,
+    Update, UpdateKind, User,
 };
 
 use crate::event::{
@@ -30,6 +30,7 @@ pub struct IngressPipeline {
     storage: StorageConnection,
     normalizer: EventNormalizer,
     router: Rc<ExecutionRouter>,
+    admin_user_ids: Vec<i64>,
 }
 
 impl IngressPipeline {
@@ -43,7 +44,16 @@ impl IngressPipeline {
             storage,
             normalizer: EventNormalizer::new(),
             router,
+            admin_user_ids: Vec::new(),
         }
+    }
+
+    pub fn with_admin_user_ids<I>(mut self, admin_user_ids: I) -> Self
+    where
+        I: IntoIterator<Item = i64>,
+    {
+        self.admin_user_ids = admin_user_ids.into_iter().collect();
+        self
     }
 
     pub fn router(&self) -> &ExecutionRouter {
@@ -96,7 +106,7 @@ impl IngressPipeline {
     }
 
     pub async fn process_update(&self, update: &Update) -> Result<IngressProcessResult> {
-        let Some(input) = update_to_input(update)? else {
+        let Some(input) = update_to_input_with_admin_user_ids(update, &self.admin_user_ids)? else {
             return Ok(IngressProcessResult::Ignored);
         };
 
@@ -200,28 +210,41 @@ pub enum IngressProcessResult {
 }
 
 pub fn update_to_input(update: &Update) -> Result<Option<TelegramUpdateInput>> {
+    update_to_input_with_admin_user_ids(update, &[])
+}
+
+fn update_to_input_with_admin_user_ids(
+    update: &Update,
+    admin_user_ids: &[i64],
+) -> Result<Option<TelegramUpdateInput>> {
     match &update.kind {
         UpdateKind::Message(message) => Ok(Some(message_update_input(
             update.id.0,
             UpdateType::Message,
             message,
+            admin_user_ids,
         ))),
         UpdateKind::EditedMessage(message) => Ok(Some(message_update_input(
             update.id.0,
             UpdateType::EditedMessage,
             message,
+            admin_user_ids,
         ))),
         UpdateKind::ChannelPost(message) => Ok(Some(message_update_input(
             update.id.0,
             UpdateType::ChannelPost,
             message,
+            admin_user_ids,
         ))),
         UpdateKind::EditedChannelPost(message) => Ok(Some(message_update_input(
             update.id.0,
             UpdateType::EditedChannelPost,
             message,
+            admin_user_ids,
         ))),
-        UpdateKind::CallbackQuery(callback) => callback_update_input(update.id.0, callback),
+        UpdateKind::CallbackQuery(callback) => {
+            callback_update_input(update.id.0, callback, admin_user_ids)
+        }
         _ => Ok(None),
     }
 }
@@ -230,6 +253,7 @@ fn message_update_input(
     update_id: u32,
     update_type: UpdateType,
     message: &Message,
+    admin_user_ids: &[i64],
 ) -> TelegramUpdateInput {
     TelegramUpdateInput {
         event_id: None,
@@ -237,8 +261,8 @@ fn message_update_input(
         update_type,
         received_at: message.date,
         execution_mode: crate::event::ExecutionMode::Realtime,
-        chat: chat_context(&message.chat),
-        sender: sender_context_from_message(message),
+        chat: chat_context(&message.chat, message),
+        sender: sender_context_from_message(message, admin_user_ids),
         message: Some(message_context(message)),
         reply: reply_context_from_message(message),
         callback: None,
@@ -248,7 +272,11 @@ fn message_update_input(
     }
 }
 
-fn callback_update_input(update_id: u32, callback: &CallbackQuery) -> Result<Option<TelegramUpdateInput>> {
+fn callback_update_input(
+    update_id: u32,
+    callback: &CallbackQuery,
+    admin_user_ids: &[i64],
+) -> Result<Option<TelegramUpdateInput>> {
     let Some(message) = callback.regular_message() else {
         return Ok(None);
     };
@@ -259,8 +287,8 @@ fn callback_update_input(update_id: u32, callback: &CallbackQuery) -> Result<Opt
         update_type: UpdateType::CallbackQuery,
         received_at: message.date,
         execution_mode: crate::event::ExecutionMode::Realtime,
-        chat: chat_context(&message.chat),
-        sender: Some(sender_context(&callback.from, false)),
+        chat: chat_context(&message.chat, message),
+        sender: Some(sender_context_from_user(&callback.from, admin_user_ids)),
         message: Some(message_context(message)),
         reply: reply_context_from_message(message),
         callback: Some(CallbackContext {
@@ -276,7 +304,7 @@ fn callback_update_input(update_id: u32, callback: &CallbackQuery) -> Result<Opt
     }))
 }
 
-fn chat_context(chat: &Chat) -> ChatContext {
+fn chat_context(chat: &Chat, message: &Message) -> ChatContext {
     let (chat_type, username) = match &chat.kind {
         ChatKind::Private(private) => ("private".to_owned(), private.username.clone()),
         ChatKind::Public(public) => match &public.kind {
@@ -291,19 +319,24 @@ fn chat_context(chat: &Chat) -> ChatContext {
         chat_type,
         title: chat.title().map(str::to_owned),
         username,
-        thread_id: message_thread_id(chat),
+        thread_id: message_thread_id(message),
     }
 }
 
-fn message_thread_id(_chat: &Chat) -> Option<i64> {
-    None
+fn message_thread_id(message: &Message) -> Option<i64> {
+    message.thread_id.map(|thread_id| i64::from(thread_id.0.0))
 }
 
-fn sender_context_from_message(message: &Message) -> Option<SenderContext> {
+fn sender_context_from_message(message: &Message, admin_user_ids: &[i64]) -> Option<SenderContext> {
     message
         .from
         .as_ref()
-        .map(|user| sender_context(user, false))
+        .map(|user| sender_context_from_user(user, admin_user_ids))
+}
+
+fn sender_context_from_user(user: &User, admin_user_ids: &[i64]) -> SenderContext {
+    let is_admin = admin_user_ids.contains(&(user.id.0 as i64));
+    sender_context(user, is_admin)
 }
 
 fn sender_context(user: &User, is_admin: bool) -> SenderContext {
@@ -329,7 +362,10 @@ fn message_context(message: &Message) -> MessageContext {
     MessageContext {
         id: message.id.0,
         date: message.date,
-        text: message.text().or_else(|| message.caption()).map(str::to_owned),
+        text: message
+            .text()
+            .or_else(|| message.caption())
+            .map(str::to_owned),
         content_kind: Some(content_kind),
         entities: Vec::new(),
         has_media: !matches!(content_kind, MessageContentKind::Text),
@@ -426,11 +462,14 @@ fn update_type_name(update_type: UpdateType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{IngressPipeline, IngressProcessResult};
-    use crate::event::{ChatContext, EventNormalizer, MessageContext, SenderContext, TelegramUpdateInput};
+    use super::{IngressPipeline, IngressProcessResult, update_to_input_with_admin_user_ids};
+    use crate::event::{
+        ChatContext, EventNormalizer, MessageContext, SenderContext, TelegramUpdateInput,
+    };
     use crate::router::ExecutionRouter;
     use crate::storage::{PROCESSED_UPDATE_STATUS_COMPLETED, Storage, StorageConnection};
     use std::rc::Rc;
+    use teloxide_core::types::Update;
 
     fn pipeline() -> (tempfile::TempDir, IngressPipeline, StorageConnection) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -442,8 +481,117 @@ mod tests {
             teloxide_core::Bot::new("123456:TEST_TOKEN"),
             ingress_storage,
             Rc::new(ExecutionRouter::new()),
-        );
+        )
+        .with_admin_user_ids([42]);
         (dir, pipeline, inspect_storage)
+    }
+
+    #[test]
+    fn message_updates_capture_thread_id_and_known_admin_sender() {
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432600,
+                "message": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "date": 1721592580,
+                    "from": {
+                        "first_name": "the Cable Guy",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "spacewhaleblues"
+                    },
+                    "message_id": 134546,
+                    "message_thread_id": 134545,
+                    "text": "/report"
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let input = update_to_input_with_admin_user_ids(&update, &[42])
+            .expect("update converts")
+            .expect("update supported");
+        let event = EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("event normalizes");
+
+        assert_eq!(
+            event.chat.as_ref().and_then(|chat| chat.thread_id),
+            Some(134545)
+        );
+        assert_eq!(
+            event.sender.as_ref().map(|sender| sender.is_admin),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn callback_updates_mark_known_admin_sender() {
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432601,
+                "callback_query": {
+                    "id": "cbq-1",
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "chat_instance": "chat-instance-1",
+                    "data": "/undo",
+                    "message": {
+                        "chat": {
+                            "id": -1001293752024,
+                            "title": "CryptoInside Chat",
+                            "type": "supergroup",
+                            "username": "cryptoinside_talk"
+                        },
+                        "date": 1721592581,
+                        "from": {
+                            "first_name": "Bot",
+                            "id": 999,
+                            "is_bot": true,
+                            "username": "sample_bot"
+                        },
+                        "message_id": 134547,
+                        "message_thread_id": 134545,
+                        "text": "undo?"
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let input = update_to_input_with_admin_user_ids(&update, &[42])
+            .expect("update converts")
+            .expect("update supported");
+        let event = EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("event normalizes");
+
+        assert_eq!(
+            event.chat.as_ref().and_then(|chat| chat.thread_id),
+            Some(134545)
+        );
+        assert_eq!(
+            event.sender.as_ref().map(|sender| sender.is_admin),
+            Some(true)
+        );
+        assert_eq!(
+            event
+                .callback
+                .as_ref()
+                .map(|callback| callback.from_user_id),
+            Some(42)
+        );
     }
 
     #[tokio::test]
@@ -481,7 +629,10 @@ mod tests {
             ))
             .expect("event normalizes");
 
-        let result = pipeline.process_event(event).await.expect("ingress succeeds");
+        let result = pipeline
+            .process_event(event)
+            .await
+            .expect("ingress succeeds");
 
         assert_eq!(result, IngressProcessResult::Processed);
         let journal = inspect_storage
