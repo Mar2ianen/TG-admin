@@ -524,8 +524,9 @@ mod tests {
     use crate::event::{
         ChatContext, EventNormalizer, MessageContext, SenderContext, TelegramUpdateInput,
     };
-    use crate::router::ExecutionRouter;
+    use crate::router::{ExecutionOutcome, ExecutionRouter};
     use crate::storage::{PROCESSED_UPDATE_STATUS_COMPLETED, Storage, StorageConnection};
+    use crate::unit::{ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry};
     use std::rc::Rc;
     use teloxide_core::types::Update;
 
@@ -539,6 +540,23 @@ mod tests {
             teloxide_core::Bot::new("123456:TEST_TOKEN"),
             ingress_storage,
             Rc::new(ExecutionRouter::new()),
+        )
+        .with_admin_user_ids([42]);
+        (dir, pipeline, inspect_storage)
+    }
+
+    fn pipeline_with_router(
+        router: ExecutionRouter,
+    ) -> (tempfile::TempDir, IngressPipeline, StorageConnection) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("runtime.sqlite3"));
+        let _ = storage.bootstrap().expect("bootstrap");
+        let ingress_storage = storage.init().expect("ingress storage");
+        let inspect_storage = storage.init().expect("inspect storage");
+        let pipeline = IngressPipeline::new(
+            teloxide_core::Bot::new("123456:TEST_TOKEN"),
+            ingress_storage,
+            Rc::new(router),
         )
         .with_admin_user_ids([42]);
         (dir, pipeline, inspect_storage)
@@ -927,5 +945,191 @@ mod tests {
             .expect("processed query")
             .expect("processed record exists");
         assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+    }
+
+    #[tokio::test]
+    async fn process_update_dispatches_loaded_unit_and_marks_update_complete() {
+        let registry = UnitRegistry::load_manifests(vec![UnitManifest::new(
+            UnitDefinition::new("command.stats.unit"),
+            TriggerSpec::command(["stats"]),
+            ServiceSpec::new("scripts/command/stats.rhai"),
+        )])
+        .registry;
+        let (_dir, pipeline, inspect_storage) =
+            pipeline_with_router(ExecutionRouter::new().with_registry(registry));
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432700,
+                "message": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "date": 1721592680,
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "message_id": 134600,
+                    "text": "/stats"
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let expected_event = EventNormalizer::new()
+            .normalize_telegram(
+                update_to_input_with_admin_user_ids(&update, &[42])
+                    .expect("update converts")
+                    .expect("update supported"),
+            )
+            .expect("event normalizes");
+        let outcome = pipeline
+            .router()
+            .route(&expected_event)
+            .await
+            .expect("routing succeeds");
+        match outcome {
+            ExecutionOutcome::UnitDispatch { invocations, .. } => {
+                assert_eq!(invocations.len(), 1);
+                assert_eq!(invocations[0].unit_id, "command.stats.unit");
+                assert_eq!(invocations[0].exec_start, "scripts/command/stats.rhai");
+            }
+            other => panic!("expected unit dispatch, got {other:?}"),
+        }
+
+        let result = pipeline
+            .process_update(&update)
+            .await
+            .expect("ingress succeeds");
+
+        assert_eq!(result, IngressProcessResult::Processed);
+        let processed = inspect_storage
+            .get_processed_update(439432700)
+            .expect("processed query")
+            .expect("processed record exists");
+        assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+        assert_eq!(processed.execution_mode, "realtime");
+        assert!(processed.event_id.starts_with("evt_tg_"));
+        assert_eq!(processed.event_id.len(), "evt_tg_".len() + 32);
+    }
+
+    #[tokio::test]
+    async fn process_update_skips_replayed_live_unit_dispatch_before_routing() {
+        let registry = UnitRegistry::load_manifests(vec![UnitManifest::new(
+            UnitDefinition::new("command.stats.unit"),
+            TriggerSpec::command(["stats"]),
+            ServiceSpec::new("scripts/command/stats.rhai"),
+        )])
+        .registry;
+        let (_dir, pipeline, inspect_storage) =
+            pipeline_with_router(ExecutionRouter::new().with_registry(registry));
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432701,
+                "message": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "date": 1721592681,
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "message_id": 134601,
+                    "text": "/stats"
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let first = pipeline
+            .process_update(&update)
+            .await
+            .expect("first ingress succeeds");
+        let second = pipeline
+            .process_update(&update)
+            .await
+            .expect("second ingress succeeds");
+
+        assert_eq!(first, IngressProcessResult::Processed);
+        assert!(matches!(second, IngressProcessResult::Replayed(_)));
+        let processed = inspect_storage
+            .get_processed_update(439432701)
+            .expect("processed query")
+            .expect("processed record exists");
+        assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+    }
+
+    #[tokio::test]
+    async fn process_update_handles_chat_member_live_update_end_to_end() {
+        let (_dir, pipeline, inspect_storage) = pipeline();
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432702,
+                "chat_member": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "date": 1721592682,
+                    "old_chat_member": {
+                        "user": {
+                            "first_name": "Bob",
+                            "id": 99,
+                            "is_bot": false,
+                            "username": "bob"
+                        },
+                        "status": "member"
+                    },
+                    "new_chat_member": {
+                        "user": {
+                            "first_name": "Bob",
+                            "id": 99,
+                            "is_bot": false,
+                            "username": "bob"
+                        },
+                        "status": "kicked",
+                        "until_date": 0
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let result = pipeline
+            .process_update(&update)
+            .await
+            .expect("ingress succeeds");
+
+        assert_eq!(result, IngressProcessResult::Processed);
+        let processed = inspect_storage
+            .get_processed_update(439432702)
+            .expect("processed query")
+            .expect("processed record exists");
+        assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+        assert_eq!(processed.execution_mode, "realtime");
+        assert!(processed.event_id.starts_with("evt_tg_"));
+        assert_eq!(processed.event_id.len(), "evt_tg_".len() + 32);
     }
 }
