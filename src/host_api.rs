@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use crate::event::EventContext;
-use crate::parser::duration::{DurationParser, ParsedDuration};
-use crate::parser::reason::{ExpandedReason, ReasonAliasRegistry};
+use crate::parser::duration::DurationParser;
+use crate::parser::reason::ReasonAliasRegistry;
 use crate::parser::target::TargetSelectorParser;
 use crate::storage::{AuditLogEntry, JobRecord, StorageConnection};
 use crate::unit::UnitRegistry;
@@ -153,49 +153,6 @@ impl HostApi {
                 .ml_models(event, request)
                 .map(|response| response.map(HostApiValue::MlModels)),
         }
-    }
-
-    pub fn ctx_parse_duration(
-        &self,
-        event: &EventContext,
-        request: CtxParseDurationRequest,
-    ) -> Result<HostApiResponse<ParsedDuration>, HostApiError> {
-        validate_event(event, HostApiOperation::CtxParseDuration)?;
-
-        let parsed = self
-            .duration_parser
-            .parse(request.input.trim())
-            .map_err(|source| {
-                HostApiError::parse(
-                    HostApiOperation::CtxParseDuration,
-                    HostApiErrorDetail::InvalidDuration {
-                        value: request.input,
-                        source,
-                    },
-                )
-            })?;
-
-        Ok(self.response(HostApiOperation::CtxParseDuration, parsed))
-    }
-
-    pub fn ctx_expand_reason(
-        &self,
-        event: &EventContext,
-        request: CtxExpandReasonRequest,
-    ) -> Result<HostApiResponse<ExpandedReason>, HostApiError> {
-        validate_event(event, HostApiOperation::CtxExpandReason)?;
-
-        let expanded = self
-            .aliases
-            .expand_reason(Some(&request.reason))
-            .ok_or_else(|| {
-                HostApiError::internal(
-                    HostApiOperation::CtxExpandReason,
-                    HostApiErrorDetail::ReasonExpansionUnavailable,
-                )
-            })?;
-
-        Ok(self.response(HostApiOperation::CtxExpandReason, expanded))
     }
 
     pub fn db_user_get(

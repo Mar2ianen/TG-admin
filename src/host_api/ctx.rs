@@ -1,8 +1,10 @@
 use super::{
-    CtxCurrentValue, CtxResolveTargetRequest, HostApi, HostApiError, HostApiErrorDetail,
-    HostApiOperation, HostApiResponse, validate_event,
+    CtxCurrentValue, CtxExpandReasonRequest, CtxParseDurationRequest, CtxResolveTargetRequest,
+    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, validate_event,
 };
 use crate::event::EventContext;
+use crate::parser::duration::ParsedDuration;
+use crate::parser::reason::ExpandedReason;
 use crate::parser::target::{ResolvedTarget, resolve_target};
 
 impl HostApi {
@@ -68,5 +70,48 @@ impl HostApi {
         })?;
 
         Ok(self.response(HostApiOperation::CtxResolveTarget, resolved))
+    }
+
+    pub fn ctx_parse_duration(
+        &self,
+        event: &EventContext,
+        request: CtxParseDurationRequest,
+    ) -> Result<HostApiResponse<ParsedDuration>, HostApiError> {
+        validate_event(event, HostApiOperation::CtxParseDuration)?;
+
+        let parsed = self
+            .duration_parser
+            .parse(request.input.trim())
+            .map_err(|source| {
+                HostApiError::parse(
+                    HostApiOperation::CtxParseDuration,
+                    HostApiErrorDetail::InvalidDuration {
+                        value: request.input,
+                        source,
+                    },
+                )
+            })?;
+
+        Ok(self.response(HostApiOperation::CtxParseDuration, parsed))
+    }
+
+    pub fn ctx_expand_reason(
+        &self,
+        event: &EventContext,
+        request: CtxExpandReasonRequest,
+    ) -> Result<HostApiResponse<ExpandedReason>, HostApiError> {
+        validate_event(event, HostApiOperation::CtxExpandReason)?;
+
+        let expanded = self
+            .aliases
+            .expand_reason(Some(&request.reason))
+            .ok_or_else(|| {
+                HostApiError::internal(
+                    HostApiOperation::CtxExpandReason,
+                    HostApiErrorDetail::ReasonExpansionUnavailable,
+                )
+            })?;
+
+        Ok(self.response(HostApiOperation::CtxExpandReason, expanded))
     }
 }
