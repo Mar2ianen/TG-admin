@@ -17,8 +17,8 @@ use crate::event::{
 use crate::router::ExecutionRouter;
 use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::{
-    MessageJournalRecord, PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
-    ProcessedUpdateRecord, StorageConnection,
+    MessageJournalRecord, ProcessedUpdateRecord, StorageConnection,
+    PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
 };
 
 const POLL_LIMIT: u8 = 32;
@@ -382,7 +382,7 @@ fn chat_context_without_message(chat: &Chat) -> ChatContext {
 }
 
 fn message_thread_id(message: &Message) -> Option<i64> {
-    message.thread_id.map(|thread_id| i64::from(thread_id.0.0))
+    message.thread_id.map(|thread_id| i64::from(thread_id.0 .0))
 }
 
 fn sender_context_from_message(message: &Message, admin_user_ids: &[i64]) -> Option<SenderContext> {
@@ -520,15 +520,15 @@ fn update_type_name(update_type: UpdateType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{IngressPipeline, IngressProcessResult, update_to_input_with_admin_user_ids};
+    use super::{update_to_input_with_admin_user_ids, IngressPipeline, IngressProcessResult};
     use crate::event::{
         ChatContext, EventNormalizer, MessageContext, SenderContext, TelegramUpdateInput,
     };
     use crate::moderation::ModerationEngine;
     use crate::router::{ExecutionOutcome, ExecutionRouter};
     use crate::storage::{
-        AuditLogFilter, MessageJournalRecord, PROCESSED_UPDATE_STATUS_COMPLETED, Storage,
-        StorageConnection,
+        AuditLogFilter, MessageJournalRecord, Storage, StorageConnection,
+        PROCESSED_UPDATE_STATUS_COMPLETED,
     };
     use crate::tg::{
         TelegramDeleteResult, TelegramGateway, TelegramMessageResult, TelegramRequest,
@@ -609,13 +609,15 @@ mod tests {
                         changed: true,
                     })
                 }
-                TelegramRequest::Ban(request) => TelegramResult::Ban(crate::tg::TelegramBanResult {
-                    chat_id: request.chat_id,
-                    user_id: request.user_id,
-                    until: request.until,
-                    delete_history: request.delete_history,
-                    changed: true,
-                }),
+                TelegramRequest::Ban(request) => {
+                    TelegramResult::Ban(crate::tg::TelegramBanResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: request.until,
+                        delete_history: request.delete_history,
+                        changed: true,
+                    })
+                }
                 TelegramRequest::Unban(request) => {
                     TelegramResult::Ban(crate::tg::TelegramBanResult {
                         chat_id: request.chat_id,
@@ -1367,7 +1369,10 @@ mod tests {
 
         assert_eq!(result, IngressProcessResult::Processed);
         let requests = requests.lock().expect("requests");
-        assert!(requests.is_empty(), "warn should not emit telegram side effects");
+        assert!(
+            requests.is_empty(),
+            "warn should not emit telegram side effects"
+        );
         drop(requests);
 
         let user = inspect_storage

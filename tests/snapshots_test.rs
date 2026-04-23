@@ -1,8 +1,8 @@
 use chrono::Utc;
 use std::fs;
 use telegram_moderation_os::event::{
-    ChatContext, EventNormalizer, ExecutionMode, MessageContentKind, MessageContext,
-    SenderContext, SystemContext, UpdateType,
+    ChatContext, EventNormalizer, ExecutionMode, MessageContentKind, MessageContext, SenderContext,
+    SystemContext, UpdateType,
 };
 use telegram_moderation_os::parser::command::CommandParser;
 use telegram_moderation_os::parser::dispatch::EventCommandDispatcher;

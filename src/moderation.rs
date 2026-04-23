@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -17,9 +17,8 @@ use crate::parser::reason::{
 };
 use crate::parser::target::{ParsedTargetSelector, ResolvedTarget, TargetSource};
 use crate::storage::{
-    AuditLogEntry, AuditLogFilter, JobRecord, ProcessedUpdateRecord,
-    PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING, StorageConnection,
-    StorageError, UserPatch,
+    AuditLogEntry, AuditLogFilter, JobRecord, ProcessedUpdateRecord, StorageConnection,
+    StorageError, UserPatch, PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
 };
 use crate::tg::{
     MessageId, TelegramBanRequest, TelegramExecution, TelegramExecutionOptions, TelegramGateway,
@@ -1245,9 +1244,11 @@ fn add_duration(
     let chrono_duration = chrono::Duration::from_std(duration.into_std())
         .map_err(|error| ModerationError::Validation(format!("duration overflow: {error}")))?;
 
-    received_at.checked_add_signed(chrono_duration).ok_or_else(|| {
-        ModerationError::Validation("mute duration exceeds supported range".to_owned())
-    })
+    received_at
+        .checked_add_signed(chrono_duration)
+        .ok_or_else(|| {
+            ModerationError::Validation("mute duration exceeds supported range".to_owned())
+        })
 }
 
 fn command_dry_run(command: &CommandAst) -> bool {
@@ -1297,8 +1298,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::storage::{
-        AuditLogFilter, MessageJournalRecord, ProcessedUpdateRecord,
-        PROCESSED_UPDATE_STATUS_PENDING, Storage,
+        AuditLogFilter, MessageJournalRecord, ProcessedUpdateRecord, Storage,
+        PROCESSED_UPDATE_STATUS_PENDING,
     };
 
     #[derive(Debug, Default)]
@@ -1646,13 +1647,11 @@ mod tests {
             } if capability == "job.schedule" && unit_id == "moderation.test"
         ));
         assert!(requests.lock().expect("requests").is_empty());
-        assert!(
-            engine
-                .storage
-                .find_audit_entries(&AuditLogFilter::default(), 10)
-                .expect("audit lookup")
-                .is_empty()
-        );
+        assert!(engine
+            .storage
+            .find_audit_entries(&AuditLogFilter::default(), 10)
+            .expect("audit lookup")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1900,7 +1899,10 @@ mod tests {
             engine_with_caps_and_admins(&["tg.moderate.restrict"], [777]);
         let event = reply_event_with_sender("/mute 30m spam", 99, 810, non_admin_sender());
 
-        let result = engine.handle_event(&event).await.expect("configured admin succeeds");
+        let result = engine
+            .handle_event(&event)
+            .await
+            .expect("configured admin succeeds");
 
         assert!(matches!(result, ModerationEventResult::Executed(_)));
         assert_eq!(requests.lock().expect("requests").len(), 1);

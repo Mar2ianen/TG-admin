@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
 use crate::storage::{
     JournalMode, StorageConfig as RuntimeStorageConfig, SynchronousMode, TempStoreMode,
 };
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;

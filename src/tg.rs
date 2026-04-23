@@ -6,11 +6,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use teloxide_core::errors::{ApiError as TeloxideApiError, RequestError as TeloxideRequestError};
 use teloxide_core::payloads::{
     AnswerCallbackQuerySetters, BanChatMemberSetters, RestrictChatMemberSetters,
     SendMessageSetters, UnbanChatMemberSetters,
 };
-use teloxide_core::errors::{ApiError as TeloxideApiError, RequestError as TeloxideRequestError};
 use teloxide_core::prelude::{Request, Requester};
 use teloxide_core::types::{
     CallbackQueryId as TeloxideCallbackQueryId, ChatId as TeloxideChatId,
@@ -199,9 +199,9 @@ impl TelegramTransport for TeloxideCoreTransport {
                     api = api.disable_notification(true);
                 }
                 if let Some(reply_to_message_id) = request.reply_to_message_id {
-                    api = api.reply_parameters(TeloxideReplyParameters::new(
-                        TeloxideMessageId(reply_to_message_id),
-                    ));
+                    api = api.reply_parameters(TeloxideReplyParameters::new(TeloxideMessageId(
+                        reply_to_message_id,
+                    )));
                 }
                 if let Some(markup) = request.markup.as_ref() {
                     api = api.reply_markup(to_teloxide_reply_markup(markup)?);
@@ -380,11 +380,10 @@ impl TelegramTransport for TeloxideCoreTransport {
                 }
                 if let Some(url) = request.url.as_deref() {
                     let parsed = reqwest::Url::parse(url).map_err(|error| {
-                        validation_error(operation, "url", "callback url must be valid").with_details(
-                            serde_json::json!({
+                        validation_error(operation, "url", "callback url must be valid")
+                            .with_details(serde_json::json!({
                                 "source": error.to_string(),
-                            }),
-                        )
+                            }))
                     })?;
                     api = api.url(parsed);
                 }
@@ -866,32 +865,42 @@ pub enum TelegramErrorKind {
 fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
     let operation = request.operation();
     if operation.requires_idempotency() && request.idempotency_key().is_none() {
-        return Err(
-            TelegramError::new(
-                operation,
-                TelegramErrorKind::Validation,
-                "idempotency key is required for this operation",
-            )
-            .with_details(serde_json::json!({
-                "field": "idempotency_key",
-            })),
-        );
+        return Err(TelegramError::new(
+            operation,
+            TelegramErrorKind::Validation,
+            "idempotency key is required for this operation",
+        )
+        .with_details(serde_json::json!({
+            "field": "idempotency_key",
+        })));
     }
 
     match request {
         TelegramRequest::SendUi(request) => {
             if request.template.trim().is_empty() {
-                return Err(validation_error(operation, "template", "template must not be empty"));
+                return Err(validation_error(
+                    operation,
+                    "template",
+                    "template must not be empty",
+                ));
             }
         }
         TelegramRequest::SendMessage(request) => {
             if request.text.trim().is_empty() {
-                return Err(validation_error(operation, "text", "text must not be empty"));
+                return Err(validation_error(
+                    operation,
+                    "text",
+                    "text must not be empty",
+                ));
             }
         }
         TelegramRequest::EditUi(request) => {
             if request.template.trim().is_empty() {
-                return Err(validation_error(operation, "template", "template must not be empty"));
+                return Err(validation_error(
+                    operation,
+                    "template",
+                    "template must not be empty",
+                ));
             }
             if request.message_id <= 0 {
                 return Err(validation_error(
@@ -918,7 +927,11 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
                     "message_ids must not be empty",
                 ));
             }
-            if request.message_ids.iter().any(|message_id| *message_id <= 0) {
+            if request
+                .message_ids
+                .iter()
+                .any(|message_id| *message_id <= 0)
+            {
                 return Err(validation_error(
                     operation,
                     "message_ids",
@@ -928,22 +941,38 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
         }
         TelegramRequest::Restrict(request) => {
             if request.user_id <= 0 {
-                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+                return Err(validation_error(
+                    operation,
+                    "user_id",
+                    "user_id must be positive",
+                ));
             }
         }
         TelegramRequest::Unrestrict(request) => {
             if request.user_id <= 0 {
-                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+                return Err(validation_error(
+                    operation,
+                    "user_id",
+                    "user_id must be positive",
+                ));
             }
         }
         TelegramRequest::Ban(request) => {
             if request.user_id <= 0 {
-                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+                return Err(validation_error(
+                    operation,
+                    "user_id",
+                    "user_id must be positive",
+                ));
             }
         }
         TelegramRequest::Unban(request) => {
             if request.user_id <= 0 {
-                return Err(validation_error(operation, "user_id", "user_id must be positive"));
+                return Err(validation_error(
+                    operation,
+                    "user_id",
+                    "user_id must be positive",
+                ));
             }
         }
         TelegramRequest::AnswerCallback(request) => {
@@ -1013,7 +1042,9 @@ fn to_teloxide_permissions(permissions: &TelegramPermissions) -> TeloxideChatPer
     mapped
 }
 
-fn to_teloxide_reply_markup(markup: &TelegramUiMarkup) -> Result<TeloxideReplyMarkup, TelegramError> {
+fn to_teloxide_reply_markup(
+    markup: &TelegramUiMarkup,
+) -> Result<TeloxideReplyMarkup, TelegramError> {
     let inline_keyboard = markup
         .inline_keyboard
         .iter()
@@ -1055,15 +1086,15 @@ fn to_teloxide_reply_markup(markup: &TelegramUiMarkup) -> Result<TeloxideReplyMa
     ))
 }
 
-fn map_teloxide_error(
-    operation: TelegramOperation,
-    error: TeloxideRequestError,
-) -> TelegramError {
+fn map_teloxide_error(operation: TelegramOperation, error: TeloxideRequestError) -> TelegramError {
     match error {
         TeloxideRequestError::RetryAfter(seconds) => TelegramError::new(
             operation,
             TelegramErrorKind::RateLimited,
-            format!("telegram rate limited request, retry after {}s", seconds.seconds()),
+            format!(
+                "telegram rate limited request, retry after {}s",
+                seconds.seconds()
+            ),
         )
         .with_retryable(true)
         .with_details(serde_json::json!({
@@ -1078,31 +1109,25 @@ fn map_teloxide_error(
         .with_details(serde_json::json!({
             "migrate_to_chat_id": chat_id.0,
         })),
-        TeloxideRequestError::Network(source) => {
-            TelegramError::new(
-                operation,
-                TelegramErrorKind::TransportUnavailable,
-                source.to_string(),
-            )
-            .with_retryable(true)
-        }
-        TeloxideRequestError::Io(source) => {
-            TelegramError::new(
-                operation,
-                TelegramErrorKind::TransportUnavailable,
-                source.to_string(),
-            )
-            .with_retryable(true)
-        }
-        TeloxideRequestError::InvalidJson { source, raw } => TelegramError::new(
+        TeloxideRequestError::Network(source) => TelegramError::new(
             operation,
-            TelegramErrorKind::Internal,
+            TelegramErrorKind::TransportUnavailable,
             source.to_string(),
         )
-        .with_retryable(true)
-        .with_details(serde_json::json!({
-            "raw": raw,
-        })),
+        .with_retryable(true),
+        TeloxideRequestError::Io(source) => TelegramError::new(
+            operation,
+            TelegramErrorKind::TransportUnavailable,
+            source.to_string(),
+        )
+        .with_retryable(true),
+        TeloxideRequestError::InvalidJson { source, raw } => {
+            TelegramError::new(operation, TelegramErrorKind::Internal, source.to_string())
+                .with_retryable(true)
+                .with_details(serde_json::json!({
+                    "raw": raw,
+                }))
+        }
         TeloxideRequestError::Api(api_error) => map_teloxide_api_error(operation, api_error),
     }
 }
@@ -1116,14 +1141,18 @@ fn map_teloxide_api_error(
         | TeloxideApiError::UserNotFound
         | TeloxideApiError::MessageToDeleteNotFound
         | TeloxideApiError::MessageIdInvalid
-        | TeloxideApiError::InvalidQueryId => {
-            TelegramError::new(operation, TelegramErrorKind::NotFound, api_error.to_string())
-        }
+        | TeloxideApiError::InvalidQueryId => TelegramError::new(
+            operation,
+            TelegramErrorKind::NotFound,
+            api_error.to_string(),
+        ),
         TeloxideApiError::MessageTextIsEmpty
         | TeloxideApiError::CantRestrictSelf
-        | TeloxideApiError::MethodNotAvailableInPrivateChats => {
-            TelegramError::new(operation, TelegramErrorKind::Validation, api_error.to_string())
-        }
+        | TeloxideApiError::MethodNotAvailableInPrivateChats => TelegramError::new(
+            operation,
+            TelegramErrorKind::Validation,
+            api_error.to_string(),
+        ),
         TeloxideApiError::NotEnoughRightsToChangeChatPermissions
         | TeloxideApiError::NotEnoughRightsToRestrict
         | TeloxideApiError::NotEnoughRightsToPostMessages
@@ -1150,7 +1179,11 @@ fn map_teloxide_api_error(
             )
             .with_retryable(true)
         }
-        _ => TelegramError::new(operation, TelegramErrorKind::Internal, api_error.to_string()),
+        _ => TelegramError::new(
+            operation,
+            TelegramErrorKind::Internal,
+            api_error.to_string(),
+        ),
     }
 }
 
