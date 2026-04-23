@@ -1,0 +1,81 @@
+[telegram]
+# Optional. Live polling starts only when bot_token is set and polling = true.
+bot_token = ""
+polling = true
+
+# Used by ingress/moderation for known-admin context.
+admin_user_ids = [123456789]
+
+# Present in config, but current runtime path does not use these fields.
+primary_chat_ids = []
+allowed_webhook_hosts = []
+
+[paths]
+data_dir = "data"
+database_path = "data/runtime.sqlite3"
+units_dir = "units"
+scripts_dir = "scripts"
+templates_dir = "templates"
+log_dir = "data/logs"
+
+[storage]
+sqlite_journal_mode = "WAL"
+sqlite_synchronous = "NORMAL"
+sqlite_busy_timeout_ms = 3000
+max_write_batch_size = 256
+write_flush_interval_ms = 5000
+
+[runtime]
+tokio_worker_threads = 4
+shutdown_grace_period_ms = 10000
+
+# Present in config, but current startup path does not change runtime behavior from them.
+reload_enabled = true
+manual_mode_enabled = false
+
+# Used when loading unit manifests from paths.units_dir.
+degraded_mode_enabled = true
+
+[limits]
+max_message_text_bytes = 16384
+max_caption_bytes = 4096
+max_callback_data_bytes = 256
+max_username_bytes = 128
+max_units_per_event = 16
+max_pipeline_depth = 4
+max_batch_ops = 16
+max_queue_depth_ingest = 2048
+max_queue_depth_dispatch = 1024
+
+[fetch_policy]
+enabled = true
+deny_private_ip_ranges = true
+deny_localhost = true
+max_concurrent_fetches = 32
+connect_timeout_ms = 1500
+request_timeout_ms = 5000
+max_response_body_bytes = 1048576
+max_decompressed_body_bytes = 4194304
+max_redirects = 3
+allowed_domains = []
+blocked_domains = []
+
+[scheduler]
+tick_interval_ms = 500
+max_concurrent_jobs = 32
+max_scheduler_lag_ms = 10000
+retry_backoff_base_ms = 1000
+retry_backoff_max_ms = 60000
+
+[observability]
+log_level = "info"
+json_logs = true
+
+# Present in config, but init_logging() does not currently use them.
+metrics_enabled = true
+trace_sampling = "low"
+
+[features]
+hot_reload = true
+semantic = true
+bloom_prefilter = true
