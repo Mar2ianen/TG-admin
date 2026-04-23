@@ -524,10 +524,21 @@ mod tests {
     use crate::event::{
         ChatContext, EventNormalizer, MessageContext, SenderContext, TelegramUpdateInput,
     };
+    use crate::moderation::ModerationEngine;
     use crate::router::{ExecutionOutcome, ExecutionRouter};
-    use crate::storage::{PROCESSED_UPDATE_STATUS_COMPLETED, Storage, StorageConnection};
+    use crate::storage::{
+        AuditLogFilter, MessageJournalRecord, PROCESSED_UPDATE_STATUS_COMPLETED, Storage,
+        StorageConnection,
+    };
+    use crate::tg::{
+        TelegramDeleteResult, TelegramGateway, TelegramMessageResult, TelegramRequest,
+        TelegramResult, TelegramTransport, TelegramUiResult,
+    };
     use crate::unit::{ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry};
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
     use teloxide_core::types::Update;
 
     fn pipeline() -> (tempfile::TempDir, IngressPipeline, StorageConnection) {
@@ -545,6 +556,112 @@ mod tests {
         (dir, pipeline, inspect_storage)
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingTransport {
+        requests: Arc<Mutex<Vec<TelegramRequest>>>,
+    }
+
+    #[async_trait]
+    impl TelegramTransport for RecordingTransport {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        async fn execute(
+            &self,
+            request: TelegramRequest,
+        ) -> Result<TelegramResult, crate::tg::TelegramError> {
+            self.requests
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+
+            Ok(match request {
+                TelegramRequest::SendMessage(request) => {
+                    TelegramResult::Message(TelegramMessageResult {
+                        chat_id: request.chat_id,
+                        message_id: request.reply_to_message_id.unwrap_or(900).saturating_add(1),
+                        raw_passthrough: false,
+                    })
+                }
+                TelegramRequest::DeleteMany(request) => {
+                    TelegramResult::Delete(TelegramDeleteResult {
+                        chat_id: request.chat_id,
+                        deleted: request.message_ids,
+                        failed: Vec::new(),
+                    })
+                }
+                TelegramRequest::Restrict(request) => {
+                    TelegramResult::Restriction(crate::tg::TelegramRestrictionResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: request.until,
+                        permissions: request.permissions,
+                        changed: true,
+                    })
+                }
+                TelegramRequest::Unrestrict(request) => {
+                    TelegramResult::Restriction(crate::tg::TelegramRestrictionResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: None,
+                        permissions: crate::tg::TelegramPermissions::default(),
+                        changed: true,
+                    })
+                }
+                TelegramRequest::Ban(request) => TelegramResult::Ban(crate::tg::TelegramBanResult {
+                    chat_id: request.chat_id,
+                    user_id: request.user_id,
+                    until: request.until,
+                    delete_history: request.delete_history,
+                    changed: true,
+                }),
+                TelegramRequest::Unban(request) => {
+                    TelegramResult::Ban(crate::tg::TelegramBanResult {
+                        chat_id: request.chat_id,
+                        user_id: request.user_id,
+                        until: None,
+                        delete_history: false,
+                        changed: true,
+                    })
+                }
+                TelegramRequest::SendUi(request) => TelegramResult::Ui(TelegramUiResult {
+                    chat_id: request.chat_id,
+                    message_id: request.reply_to_message_id.unwrap_or(700).saturating_add(1),
+                    template: request.template,
+                    edited: false,
+                    raw_passthrough: false,
+                }),
+                TelegramRequest::EditUi(request) => TelegramResult::Ui(TelegramUiResult {
+                    chat_id: request.chat_id,
+                    message_id: request.message_id,
+                    template: request.template,
+                    edited: true,
+                    raw_passthrough: false,
+                }),
+                TelegramRequest::Delete(request) => TelegramResult::Delete(TelegramDeleteResult {
+                    chat_id: request.chat_id,
+                    deleted: vec![request.message_id],
+                    failed: Vec::new(),
+                }),
+                TelegramRequest::AnswerCallback(request) => {
+                    TelegramResult::Callback(crate::tg::TelegramCallbackResult {
+                        callback_query_id: request.callback_query_id,
+                        answered: true,
+                        show_alert: request.show_alert,
+                        text: request.text,
+                    })
+                }
+            })
+        }
+    }
+
+    fn moderation_ts() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 23, 12, 0, 0)
+            .single()
+            .expect("valid timestamp")
+    }
+
     fn pipeline_with_router(
         router: ExecutionRouter,
     ) -> (tempfile::TempDir, IngressPipeline, StorageConnection) {
@@ -560,6 +677,71 @@ mod tests {
         )
         .with_admin_user_ids([42]);
         (dir, pipeline, inspect_storage)
+    }
+
+    fn moderation_pipeline_with_caps(
+        caps: &[&str],
+    ) -> (
+        tempfile::TempDir,
+        IngressPipeline,
+        StorageConnection,
+        Arc<Mutex<Vec<TelegramRequest>>>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("runtime.sqlite3"));
+        let bootstrap = storage.bootstrap().expect("bootstrap");
+        let moderation_storage = bootstrap.into_connection();
+        let ingress_storage = storage.init().expect("ingress storage");
+        let inspect_storage = storage.init().expect("inspect storage");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let transport = RecordingTransport {
+            requests: Arc::clone(&requests),
+        };
+        let gateway = TelegramGateway::new(false).with_transport(transport);
+        let registry = crate::unit::UnitRegistry::load_manifests(vec![{
+            let mut manifest = UnitManifest::new(
+                UnitDefinition::new("moderation.test"),
+                TriggerSpec::command(["warn", "mute", "del", "undo"]),
+                ServiceSpec::new("scripts/moderation/test.rhai"),
+            );
+            manifest.capabilities.allow = caps.iter().map(|value| (*value).to_owned()).collect();
+            manifest
+        }])
+        .registry;
+        let moderation = ModerationEngine::new(moderation_storage, gateway)
+            .with_unit_registry(registry.clone())
+            .with_admin_user_ids([42])
+            .without_processed_update_guard();
+        let router = ExecutionRouter::new()
+            .with_registry(registry)
+            .with_moderation(moderation);
+        let pipeline = IngressPipeline::new(
+            teloxide_core::Bot::new("123456:TEST_TOKEN"),
+            ingress_storage,
+            Rc::new(router),
+        )
+        .with_admin_user_ids([42]);
+        (dir, pipeline, inspect_storage, requests)
+    }
+
+    fn seed_journal(storage: &StorageConnection) {
+        for (message_id, user_id) in [(810, Some(99)), (811, Some(77)), (812, Some(99))] {
+            storage
+                .append_message_journal(&MessageJournalRecord {
+                    chat_id: -100123,
+                    message_id,
+                    user_id,
+                    date_utc: moderation_ts().to_rfc3339(),
+                    update_type: "message".to_owned(),
+                    text: Some(format!("msg-{message_id}")),
+                    normalized_text: None,
+                    has_media: false,
+                    reply_to_message_id: None,
+                    file_ids_json: None,
+                    meta_json: None,
+                })
+                .expect("journal insert");
+        }
     }
 
     #[test]
@@ -1131,5 +1313,242 @@ mod tests {
         assert_eq!(processed.execution_mode, "realtime");
         assert!(processed.event_id.starts_with("evt_tg_"));
         assert_eq!(processed.event_id.len(), "evt_tg_".len() + 32);
+    }
+
+    #[tokio::test]
+    async fn process_update_executes_live_mute_via_built_in_moderation() {
+        let (_dir, pipeline, inspect_storage, requests) =
+            moderation_pipeline_with_caps(&["tg.moderate.restrict"]);
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432703,
+                "message": {
+                    "chat": {
+                        "id": -100123,
+                        "title": "Moderation HQ",
+                        "type": "supergroup",
+                        "username": "mod_hq"
+                    },
+                    "date": 1721592683,
+                    "from": {
+                        "first_name": "Admin",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "admin"
+                    },
+                    "message_id": 900,
+                    "text": "/mute 30m spam",
+                    "reply_to_message": {
+                        "message_id": 902,
+                        "chat": {
+                            "id": -100123,
+                            "title": "Moderation HQ",
+                            "type": "supergroup",
+                            "username": "mod_hq"
+                        },
+                        "date": 1721592685,
+                        "from": {
+                            "first_name": "Admin",
+                            "id": 42,
+                            "is_bot": false,
+                            "username": "admin"
+                        },
+                        "text": "/mute 30m spam"
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let result = pipeline
+            .process_update(&update)
+            .await
+            .expect("ingress succeeds");
+
+        assert_eq!(result, IngressProcessResult::Processed);
+        let requests = requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(requests[0], TelegramRequest::Restrict(_)));
+        let processed = inspect_storage
+            .get_processed_update(439432703)
+            .expect("processed query")
+            .expect("processed record exists");
+        assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+    }
+
+    #[tokio::test]
+    async fn process_update_executes_live_delete_window_via_built_in_moderation() {
+        let (_dir, pipeline, inspect_storage, requests) =
+            moderation_pipeline_with_caps(&["tg.moderate.delete"]);
+        seed_journal(&inspect_storage);
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432704,
+                "message": {
+                    "chat": {
+                        "id": -100123,
+                        "title": "Moderation HQ",
+                        "type": "supergroup",
+                        "username": "mod_hq"
+                    },
+                    "date": 1721592684,
+                    "from": {
+                        "first_name": "Admin",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "admin"
+                    },
+                    "message_id": 901,
+                    "text": "/del msg:811 -up 1 -dn 1 -user 99"
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let result = pipeline
+            .process_update(&update)
+            .await
+            .expect("ingress succeeds");
+
+        assert_eq!(result, IngressProcessResult::Processed);
+        let requests = requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        let TelegramRequest::DeleteMany(request) = &requests[0] else {
+            panic!("expected delete_many request");
+        };
+        assert_eq!(request.message_ids, vec![810, 812]);
+        let processed = inspect_storage
+            .get_processed_update(439432704)
+            .expect("processed query")
+            .expect("processed record exists");
+        assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+    }
+
+    #[tokio::test]
+    async fn process_update_executes_live_undo_after_mute_via_built_in_moderation() {
+        let (_dir, pipeline, inspect_storage, requests) =
+            moderation_pipeline_with_caps(&["tg.moderate.restrict", "audit.compensate"]);
+        let mute_update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432705,
+                "message": {
+                    "chat": {
+                        "id": -100123,
+                        "title": "Moderation HQ",
+                        "type": "supergroup",
+                        "username": "mod_hq"
+                    },
+                    "date": 1721592685,
+                    "from": {
+                        "first_name": "Admin",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "admin"
+                    },
+                    "message_id": 902,
+                    "text": "/mute 30m spam",
+                    "reply_to_message": {
+                        "message_id": 810,
+                        "chat": {
+                            "id": -100123,
+                            "title": "Moderation HQ",
+                            "type": "supergroup",
+                            "username": "mod_hq"
+                        },
+                        "date": 1721592580,
+                        "from": {
+                            "first_name": "Spammer",
+                            "id": 99,
+                            "is_bot": false,
+                            "username": "spam_user"
+                        },
+                        "text": "spam"
+                    }
+                }
+            }"#,
+        )
+        .expect("mute update parses");
+        let undo_update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432706,
+                "message": {
+                    "chat": {
+                        "id": -100123,
+                        "title": "Moderation HQ",
+                        "type": "supergroup",
+                        "username": "mod_hq"
+                    },
+                    "date": 1721592686,
+                    "from": {
+                        "first_name": "Admin",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "admin"
+                    },
+                    "message_id": 903,
+                    "text": "/undo",
+                    "reply_to_message": {
+                        "message_id": 902,
+                        "chat": {
+                            "id": -100123,
+                            "title": "Moderation HQ",
+                            "type": "supergroup",
+                            "username": "mod_hq"
+                        },
+                        "date": 1721592685,
+                        "from": {
+                            "first_name": "Admin",
+                            "id": 42,
+                            "is_bot": false,
+                            "language_code": "en",
+                            "username": "admin"
+                        },
+                        "text": "/mute 30m spam"
+                    }
+                }
+            }"#,
+        )
+        .expect("undo update parses");
+
+        let mute_result = pipeline
+            .process_update(&mute_update)
+            .await
+            .expect("mute ingress succeeds");
+        let undo_result = pipeline
+            .process_update(&undo_update)
+            .await
+            .expect("undo ingress succeeds");
+
+        assert_eq!(mute_result, IngressProcessResult::Processed);
+        assert_eq!(undo_result, IngressProcessResult::Processed);
+        let requests = requests.lock().expect("requests");
+        assert_eq!(requests.len(), 2);
+        assert!(matches!(requests[0], TelegramRequest::Restrict(_)));
+        assert!(matches!(requests[1], TelegramRequest::Unrestrict(_)));
+        let processed_mute = inspect_storage
+            .get_processed_update(439432705)
+            .expect("mute processed query")
+            .expect("mute processed record exists");
+        assert_eq!(processed_mute.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+        let processed_undo = inspect_storage
+            .get_processed_update(439432706)
+            .expect("undo processed query")
+            .expect("undo processed record exists");
+        assert_eq!(processed_undo.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+        let undo_entries = inspect_storage
+            .find_audit_entries(
+                &AuditLogFilter {
+                    op: Some("undo".to_owned()),
+                    target_id: Some("99".to_owned()),
+                    ..AuditLogFilter::default()
+                },
+                10,
+            )
+            .expect("audit lookup");
+        assert_eq!(undo_entries.len(), 1);
     }
 }

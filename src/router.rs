@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::event::{
     AuthorSourceClass, ChatRouteClass, CommandSource, EventContext, ExecutionMode,
-    MessageContentKind, UpdateType,
+    MessageContentKind, UnitContext, UpdateType,
 };
 use crate::moderation::{ModerationEngine, ModerationError, ModerationEventResult};
 use crate::unit::{TriggerSpec, UnitEventType, UnitRegistry, UnitStatus};
@@ -396,6 +396,7 @@ impl ExecutionRouter {
 
     pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
         let plan = self.plan(event);
+        let unit_invocations = select_unit_dispatches(&self.registry, event);
 
         if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
             let deferred_lanes = deferred_lanes(&plan, ExecutionLane::BuiltInModeration);
@@ -405,7 +406,8 @@ impl ExecutionRouter {
                 .ok_or(RoutingError::MissingLaneExecutor {
                     lane: ExecutionLane::BuiltInModeration,
                 })?;
-            let result = moderation.handle_event(event).await?;
+            let built_in_event = bind_manifest_unit_for_built_in(event, &unit_invocations);
+            let result = moderation.handle_event(&built_in_event).await?;
             return Ok(ExecutionOutcome::BuiltInModeration {
                 plan,
                 result,
@@ -413,11 +415,11 @@ impl ExecutionRouter {
             });
         }
 
-        if plan.lanes.contains(&ExecutionLane::UnitDispatch) {
-            let invocations = select_unit_dispatches(&self.registry, event);
-            if !invocations.is_empty() {
-                return Ok(ExecutionOutcome::UnitDispatch { plan, invocations });
-            }
+        if plan.lanes.contains(&ExecutionLane::UnitDispatch) && !unit_invocations.is_empty() {
+            return Ok(ExecutionOutcome::UnitDispatch {
+                plan,
+                invocations: unit_invocations,
+            });
         }
 
         Ok(ExecutionOutcome::Unhandled(plan))
@@ -620,6 +622,28 @@ fn deferred_lanes(plan: &RoutePlan, executed_lane: ExecutionLane) -> Vec<Executi
         .copied()
         .filter(|lane| *lane != executed_lane)
         .collect()
+}
+
+fn bind_manifest_unit_for_built_in(
+    event: &EventContext,
+    invocations: &[UnitDispatchInvocation],
+) -> EventContext {
+    let Some(invocation) = invocations.first() else {
+        return event.clone();
+    };
+
+    event.clone().bind_unit(
+        UnitContext::new(invocation.unit_id.clone())
+            .with_trigger(unit_trigger_name(&invocation.trigger)),
+    )
+}
+
+fn unit_trigger_name(trigger: &UnitDispatchTrigger) -> &'static str {
+    match trigger {
+        UnitDispatchTrigger::Command { .. }
+        | UnitDispatchTrigger::Regex { .. }
+        | UnitDispatchTrigger::EventType { .. } => "telegram",
+    }
 }
 
 fn select_unit_dispatches(
@@ -1201,6 +1225,56 @@ mod tests {
                 ExecutionLane::UnitDispatch,
             ]
         );
+        assert_eq!(deferred_lanes, vec![ExecutionLane::UnitDispatch]);
+        assert!(matches!(result, ModerationEventResult::Executed(_)));
+    }
+
+    #[tokio::test]
+    async fn router_binds_manifest_unit_context_before_built_in_moderation() {
+        let mut unit_manifest = UnitManifest::new(
+            UnitDefinition::new("moderation.mute.shadow"),
+            TriggerSpec::command(["mute"]),
+            ServiceSpec::new("scripts/moderation/mute_shadow.rhai"),
+        );
+        unit_manifest.capabilities = CapabilitiesSpec {
+            allow: vec!["tg.moderate.restrict".to_owned()],
+            deny: Vec::new(),
+        };
+        let registry = registry_from_manifests(vec![unit_manifest]);
+        let dir = tempdir().expect("tempdir");
+        let storage = Storage::new(dir.path().join("runtime.sqlite3"))
+            .bootstrap()
+            .expect("bootstrap")
+            .into_connection();
+        let gateway = TelegramGateway::new(false);
+        let engine = ModerationEngine::new(storage, gateway)
+            .with_unit_registry(registry.clone())
+            .with_dry_run(true)
+            .with_admin_user_ids([42]);
+        let router = ExecutionRouter::new()
+            .with_registry(registry.clone())
+            .with_index(RouterIndex::from_registry(&registry))
+            .with_moderation(engine);
+        let mut event = manual_event("/mute 30m spam");
+        event.reply = Some(crate::event::ReplyContext {
+            message_id: 900,
+            sender_user_id: Some(99),
+            sender_username: Some("spam".to_owned()),
+            text: Some("spam".to_owned()),
+            has_media: false,
+        });
+        event.message = event.message.map(|message| message.with_reply(Some(900)));
+
+        let outcome = router.route(&event).await.expect("routing succeeds");
+
+        let ExecutionOutcome::BuiltInModeration {
+            result,
+            deferred_lanes,
+            ..
+        } = outcome
+        else {
+            panic!("expected built-in moderation outcome");
+        };
         assert_eq!(deferred_lanes, vec![ExecutionLane::UnitDispatch]);
         assert!(matches!(result, ModerationEventResult::Executed(_)));
     }
