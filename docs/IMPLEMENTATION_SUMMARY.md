@@ -10,7 +10,7 @@
 - что является целевой архитектурой
 - какие инварианты нельзя потерять при рефакторе
 
-Главная поправка к прежней формулировке: в проекте уже есть сильный vertical slice moderation и набор базовых runtime-контрактов, но полноценный runtime router по целевой модели еще не собран.
+Главная поправка к прежней формулировке: в проекте уже есть сильный vertical slice moderation, `Runtime`, `ExecutionRouter`, `IngressPipeline` и polling-based live runtime path, но полноценный unit-aware runtime router по целевой модели еще не собран.
 
 ## Текущее состояние коротко
 
@@ -62,7 +62,7 @@
 
 Важно:
 
-`Application` сейчас остается lifecycle shell. Отдельного `Runtime` как явного execution graph в коде еще нет.
+`Application` остается lifecycle shell и делегирует execution graph в `Runtime`. При этом runtime пока поднимает пустой `UnitRegistry::default()`, без bootstrap из `config.paths.units_dir`.
 
 ## Event and parser layer
 
@@ -179,7 +179,7 @@ registry и manifests пока существуют как отдельный с
 
 Важно:
 
-живой transport по умолчанию еще не подключен. По умолчанию gateway все еще `noop`.
+живой transport уже подключается через `teloxide-core`, когда задан `telegram.bot_token`. Без токена gateway остается `noop`.
 
 ## Built-in moderation layer
 
@@ -202,18 +202,19 @@ registry и manifests пока существуют как отдельный с
 
 ## Как routing работает сейчас
 
-На текущем коде есть два уровня:
+На текущем коде есть уже верхний runtime path и built-in execution path:
 
-1. `Application` поднимает сервисы и lifecycle, но не запускает ingest/dispatch loop.
-2. `ModerationEngine` умеет локально принять уже готовый `EventContext`, распарсить moderation-команду и исполнить built-in semantics.
+1. `Application` поднимает lifecycle и делегирует startup/run/shutdown в `Runtime`.
+2. `Runtime` собирает `ExecutionRouter`, при наличии `bot_token` поднимает `IngressPipeline` с polling ingest loop и маршрутизирует live updates в router.
+3. `ModerationEngine` остается основной реально работающей built-in execution lane для moderation-команд.
 
 То есть текущий working path такой:
 
-`normalized event -> parser/dispatch -> ModerationEngine -> built-in moderation execution -> storage/tg/audit/jobs`
+`Telegram update -> IngressPipeline -> EventContext -> ExecutionRouter -> parser/dispatch -> ModerationEngine -> built-in moderation execution -> storage/tg/audit/jobs`
 
-А вот такого пути пока нет:
+А вот такого пути пока нет end-to-end:
 
-`Application -> ingress -> classify -> dispatch set -> executor selection -> execution`
+`config.paths.units_dir -> registry bootstrap -> unit-aware dispatch set -> actual unit execution lane`
 
 Это ключевая граница между тем, что уже собрано, и тем, что еще предстоит собрать.
 
@@ -233,6 +234,8 @@ registry и manifests пока существуют как отдельный с
 3. при приходе события сначала делает cheap classification
 4. получает не один handler, а `dispatch set` релевантных buckets
 5. исполняет только подходящие endpoint groups
+
+В текущем коде cheap classification, router и live ingress path уже есть, но unit manifests не bootstrap-ятся из `config.paths.units_dir`, а unit execution lane пока не исполняется end-to-end.
 
 Это не “одна корзина на событие”.
 

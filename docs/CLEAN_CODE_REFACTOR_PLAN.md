@@ -22,7 +22,7 @@
 Проблема в другом:
 
 - хорошие локальные слои уже есть
-- runtime-level router еще отсутствует
+- runtime-level router уже есть в минимальном виде
 - если продолжать без явного routing layer, логика начнет расползаться по `app.rs`, `moderation.rs`, `host_api.rs`
 
 То есть следующий риск — не parser mess, а несколько параллельных оркестраторов.
@@ -70,12 +70,13 @@
 
 ## 1. `Application` не должен быть router
 
-Сейчас `Application` правильно остается lifecycle shell, но вокруг него нужен отдельный runtime graph.
+Сейчас `Application` правильно остается lifecycle shell, а отдельный runtime graph уже собран. Следующий шаг здесь не создание `Runtime` с нуля, а дозавершение unit-aware wiring.
 
 Нужно:
 
 - оставить lifecycle в `app.rs`
-- вынести execution wiring в `Runtime`
+- держать execution wiring в `Runtime`
+- добавить bootstrap units из `config.paths.units_dir`
 
 ## 2. Нет отдельного classification слоя
 
@@ -89,7 +90,7 @@
 
 ## 3. Нет prebuilt indexes
 
-Сейчас есть parser и manifests, но нет runtime structure вида:
+Сейчас есть parser, manifests и минимальная runtime structure вида:
 
 - `command_index`
 - `update_trait_index`
@@ -97,7 +98,7 @@
 
 Нужно:
 
-- строить эти индексы на startup/reload
+- строить эти индексы на startup/reload из реально загруженного registry, а не из `UnitRegistry::default()`
 
 ## 4. `ModerationEngine` слишком широкий
 
