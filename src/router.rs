@@ -36,10 +36,18 @@ impl EventClassifier {
         if event.reply.is_some() {
             push_unique(&mut traits, EventTrait::Reply);
         }
-        if event.message.as_ref().is_some_and(|message| message.has_media) {
+        if event
+            .message
+            .as_ref()
+            .is_some_and(|message| message.has_media)
+        {
             push_unique(&mut traits, EventTrait::Media);
         }
-        if let Some(content_kind) = event.message.as_ref().and_then(|message| message.content_kind) {
+        if let Some(content_kind) = event
+            .message
+            .as_ref()
+            .and_then(|message| message.content_kind)
+        {
             push_unique(&mut traits, event_trait_for_content_kind(content_kind));
             if !matches!(content_kind, MessageContentKind::Text) {
                 push_unique(&mut traits, EventTrait::Media);
@@ -200,10 +208,9 @@ impl RouterIndex {
     pub fn with_builtin_moderation_commands() -> Self {
         let mut index = Self::new();
         for command in ["warn", "mute", "ban", "del", "undo", "msg"] {
-            index.command_index.insert(
-                command.to_owned(),
-                vec![ExecutionLane::BuiltInModeration],
-            );
+            index
+                .command_index
+                .insert(command.to_owned(), vec![ExecutionLane::BuiltInModeration]);
         }
         index
     }
@@ -229,7 +236,8 @@ impl RouterIndex {
                     }
                 }
                 TriggerSpec::Regex { .. } => {
-                    index = index.register_trait_lane(EventTrait::Text, ExecutionLane::UnitDispatch);
+                    index =
+                        index.register_trait_lane(EventTrait::Text, ExecutionLane::UnitDispatch);
                 }
                 TriggerSpec::EventType { events } => {
                     for event in events {
@@ -262,12 +270,11 @@ impl RouterIndex {
         self
     }
 
-    pub fn register_chat_scope_lane(
-        mut self,
-        chat_scope: ChatScope,
-        lane: ExecutionLane,
-    ) -> Self {
-        self.chat_scope_index.entry(chat_scope).or_default().push(lane);
+    pub fn register_chat_scope_lane(mut self, chat_scope: ChatScope, lane: ExecutionLane) -> Self {
+        self.chat_scope_index
+            .entry(chat_scope)
+            .or_default()
+            .push(lane);
         self
     }
 
@@ -382,6 +389,7 @@ impl ExecutionRouter {
         let plan = self.plan(event);
 
         if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
+            let deferred_lanes = deferred_lanes(&plan, ExecutionLane::BuiltInModeration);
             let moderation = self
                 .moderation
                 .as_ref()
@@ -389,7 +397,11 @@ impl ExecutionRouter {
                     lane: ExecutionLane::BuiltInModeration,
                 })?;
             let result = moderation.handle_event(event).await?;
-            return Ok(ExecutionOutcome::BuiltInModeration { plan, result });
+            return Ok(ExecutionOutcome::BuiltInModeration {
+                plan,
+                result,
+                deferred_lanes,
+            });
         }
 
         if plan.lanes.contains(&ExecutionLane::UnitDispatch) {
@@ -436,6 +448,7 @@ pub enum ExecutionOutcome {
     BuiltInModeration {
         plan: RoutePlan,
         result: ModerationEventResult,
+        deferred_lanes: Vec<ExecutionLane>,
     },
     Unhandled(RoutePlan),
 }
@@ -568,6 +581,14 @@ where
     for item in iter {
         push_unique(items, item);
     }
+}
+
+fn deferred_lanes(plan: &RoutePlan, executed_lane: ExecutionLane) -> Vec<ExecutionLane> {
+    plan.lanes
+        .iter()
+        .copied()
+        .filter(|lane| *lane != executed_lane)
+        .collect()
 }
 
 #[cfg(test)]
@@ -933,21 +954,26 @@ mod tests {
         let router = ExecutionRouter::new();
         let plan = router.plan(&realtime_text_event("hello"));
 
-        assert!(plan
-            .matched_buckets
-            .contains(&RouteBucket::IngressClass(IngressClass::Realtime)));
-        assert!(plan
-            .matched_buckets
-            .contains(&RouteBucket::ChatScope(ChatScope::Supergroup)));
-        assert!(plan
-            .matched_buckets
-            .contains(&RouteBucket::AuthorKind(AuthorKind::HumanAdmin)));
-        assert!(plan
-            .matched_buckets
-            .contains(&RouteBucket::EventTrait(EventTrait::Message)));
-        assert!(plan
-            .matched_buckets
-            .contains(&RouteBucket::EventTrait(EventTrait::Text)));
+        assert!(
+            plan.matched_buckets
+                .contains(&RouteBucket::IngressClass(IngressClass::Realtime))
+        );
+        assert!(
+            plan.matched_buckets
+                .contains(&RouteBucket::ChatScope(ChatScope::Supergroup))
+        );
+        assert!(
+            plan.matched_buckets
+                .contains(&RouteBucket::AuthorKind(AuthorKind::HumanAdmin))
+        );
+        assert!(
+            plan.matched_buckets
+                .contains(&RouteBucket::EventTrait(EventTrait::Message))
+        );
+        assert!(
+            plan.matched_buckets
+                .contains(&RouteBucket::EventTrait(EventTrait::Text))
+        );
         assert!(plan.lanes.is_empty());
     }
 
@@ -980,14 +1006,18 @@ mod tests {
 
         let command_plan = index.plan(EventClassifier::new().classify(&manual_event("/stats")));
         assert!(command_plan.lanes.contains(&ExecutionLane::UnitDispatch));
-        assert!(command_plan
-            .matched_buckets
-            .contains(&RouteBucket::CommandIndex("stats".to_owned())));
+        assert!(
+            command_plan
+                .matched_buckets
+                .contains(&RouteBucket::CommandIndex("stats".to_owned()))
+        );
 
         let callback_plan = index.plan(EventClassifier::new().classify(&callback_event("resolve")));
-        assert!(callback_plan
-            .matched_buckets
-            .contains(&RouteBucket::EventTrait(EventTrait::CallbackQuery)));
+        assert!(
+            callback_plan
+                .matched_buckets
+                .contains(&RouteBucket::EventTrait(EventTrait::CallbackQuery))
+        );
         assert!(callback_plan.lanes.contains(&ExecutionLane::UnitDispatch));
     }
 
@@ -1006,12 +1036,60 @@ mod tests {
 
         let outcome = router.route(&event).await.expect("routing succeeds");
 
-        let ExecutionOutcome::BuiltInModeration { plan, result } = outcome else {
+        let ExecutionOutcome::BuiltInModeration {
+            plan,
+            result,
+            deferred_lanes,
+        } = outcome
+        else {
             panic!("expected built-in moderation outcome");
         };
-        assert!(plan
-            .matched_buckets
-            .contains(&RouteBucket::CommandIndex("warn".to_owned())));
+        assert!(
+            plan.matched_buckets
+                .contains(&RouteBucket::CommandIndex("warn".to_owned()))
+        );
+        assert!(deferred_lanes.is_empty());
+        assert!(matches!(result, ModerationEventResult::Executed(_)));
+    }
+
+    #[tokio::test]
+    async fn router_surfaces_deferred_unit_dispatch_when_built_in_and_unit_match_same_command() {
+        let unit_manifest = UnitManifest::new(
+            UnitDefinition::new("moderation.warn.shadow"),
+            TriggerSpec::command(["warn"]),
+            ServiceSpec::new("scripts/moderation/warn_shadow.rhai"),
+        );
+        let router = router_with_moderation().with_index(RouterIndex::from_registry(
+            &registry_from_manifests(vec![unit_manifest]),
+        ));
+        let mut event = manual_event("/warn @spam spam");
+        event.reply = Some(crate::event::ReplyContext {
+            message_id: 900,
+            sender_user_id: Some(99),
+            sender_username: Some("spam".to_owned()),
+            text: Some("spam".to_owned()),
+            has_media: false,
+        });
+        event.message = event.message.map(|message| message.with_reply(Some(900)));
+
+        let outcome = router.route(&event).await.expect("routing succeeds");
+
+        let ExecutionOutcome::BuiltInModeration {
+            plan,
+            result,
+            deferred_lanes,
+        } = outcome
+        else {
+            panic!("expected built-in moderation outcome");
+        };
+        assert_eq!(
+            plan.lanes,
+            vec![
+                ExecutionLane::BuiltInModeration,
+                ExecutionLane::UnitDispatch,
+            ]
+        );
+        assert_eq!(deferred_lanes, vec![ExecutionLane::UnitDispatch]);
         assert!(matches!(result, ModerationEventResult::Executed(_)));
     }
 
@@ -1028,11 +1106,11 @@ mod tests {
         });
         event.message = event.message.map(|message| message.with_reply(Some(900)));
 
-        let error = router.route(&event).await.expect_err("missing executor must fail");
+        let error = router
+            .route(&event)
+            .await
+            .expect_err("missing executor must fail");
 
-        assert!(matches!(
-            error,
-            RoutingError::MissingLaneExecutor { .. }
-        ));
+        assert!(matches!(error, RoutingError::MissingLaneExecutor { .. }));
     }
 }
