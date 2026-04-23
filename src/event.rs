@@ -107,7 +107,9 @@ impl EventContext {
             Some(sender) if sender.is_bot => AuthorSourceClass::Bot,
             Some(sender) if sender.is_admin => AuthorSourceClass::HumanAdmin,
             Some(_) => AuthorSourceClass::HumanMember,
-            None if self.is_linked_channel_style_approx() => AuthorSourceClass::ChannelStyleNoSender,
+            None if self.is_linked_channel_style_approx() => {
+                AuthorSourceClass::ChannelStyleNoSender
+            }
             None => AuthorSourceClass::Unknown,
         }
     }
@@ -770,6 +772,18 @@ fn validate_telegram_shape(input: &TelegramUpdateInput) -> Result<(), EventNorma
                 return Err(EventNormalizationError::MissingTelegramCallback);
             }
         }
+        UpdateType::ChatMember | UpdateType::MyChatMember | UpdateType::JoinRequest => {
+            if input.message.is_some() {
+                return Err(EventNormalizationError::InvalidEvent(anyhow::anyhow!(
+                    "chat-member-style telegram updates must not include message context"
+                )));
+            }
+            if input.callback.is_some() {
+                return Err(EventNormalizationError::InvalidEvent(anyhow::anyhow!(
+                    "chat-member-style telegram updates must not include callback context"
+                )));
+            }
+        }
         other => {
             return Err(EventNormalizationError::UnsupportedTelegramUpdateType(
                 other,
@@ -1116,7 +1130,10 @@ mod tests {
             .expect("scheduled normalization must succeed");
 
         assert_eq!(
-            event.message.as_ref().and_then(|message| message.reply_to_message_id),
+            event
+                .message
+                .as_ref()
+                .and_then(|message| message.reply_to_message_id),
             Some(777)
         );
     }
@@ -1217,5 +1234,66 @@ mod tests {
             event.command_source(),
             Some(CommandSource::CallbackData("/undo -dry"))
         );
+    }
+
+    #[test]
+    fn chat_member_updates_normalize_without_message_or_callback_context() {
+        let normalizer = EventNormalizer::new();
+        let input = TelegramUpdateInput {
+            event_id: Some("evt_chat_member".to_owned()),
+            update_id: 9,
+            update_type: UpdateType::ChatMember,
+            received_at: ts(),
+            execution_mode: ExecutionMode::Realtime,
+            chat: chat(),
+            sender: Some(sender()),
+            message: None,
+            reply: None,
+            callback: None,
+            locale: Some("en".to_owned()),
+            trace_id: None,
+            build: None,
+        };
+
+        let event = normalizer
+            .normalize_telegram(input)
+            .expect("chat member normalization must succeed");
+
+        assert_eq!(event.update_type, UpdateType::ChatMember);
+        assert_eq!(event.system.origin, SystemOrigin::Telegram);
+        assert_eq!(event.chat.as_ref().map(|chat| chat.id), Some(-100123));
+        assert_eq!(event.sender.as_ref().map(|sender| sender.id), Some(42));
+        assert!(event.message.is_none());
+        assert!(event.callback.is_none());
+    }
+
+    #[test]
+    fn join_request_updates_normalize_without_message_or_callback_context() {
+        let normalizer = EventNormalizer::new();
+        let input = TelegramUpdateInput {
+            event_id: Some("evt_join_request".to_owned()),
+            update_id: 10,
+            update_type: UpdateType::JoinRequest,
+            received_at: ts(),
+            execution_mode: ExecutionMode::Realtime,
+            chat: chat(),
+            sender: Some(sender()),
+            message: None,
+            reply: None,
+            callback: None,
+            locale: Some("ru".to_owned()),
+            trace_id: None,
+            build: None,
+        };
+
+        let event = normalizer
+            .normalize_telegram(input)
+            .expect("join request normalization must succeed");
+
+        assert_eq!(event.update_type, UpdateType::JoinRequest);
+        assert_eq!(event.system.origin, SystemOrigin::Telegram);
+        assert_eq!(event.system.locale.as_deref(), Some("ru"));
+        assert!(event.message.is_none());
+        assert!(event.callback.is_none());
     }
 }

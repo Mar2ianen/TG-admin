@@ -85,6 +85,9 @@ impl IngressPipeline {
                 AllowedUpdate::ChannelPost,
                 AllowedUpdate::EditedChannelPost,
                 AllowedUpdate::CallbackQuery,
+                AllowedUpdate::MyChatMember,
+                AllowedUpdate::ChatMember,
+                AllowedUpdate::ChatJoinRequest,
             ]);
 
         if let Some(offset) = offset {
@@ -245,6 +248,30 @@ fn update_to_input_with_admin_user_ids(
         UpdateKind::CallbackQuery(callback) => {
             callback_update_input(update.id.0, callback, admin_user_ids)
         }
+        UpdateKind::ChatMember(member) => Ok(Some(chat_member_update_input(
+            update.id.0,
+            UpdateType::ChatMember,
+            &member.chat,
+            &member.from,
+            member.date,
+            admin_user_ids,
+        ))),
+        UpdateKind::MyChatMember(member) => Ok(Some(chat_member_update_input(
+            update.id.0,
+            UpdateType::MyChatMember,
+            &member.chat,
+            &member.from,
+            member.date,
+            admin_user_ids,
+        ))),
+        UpdateKind::ChatJoinRequest(request) => Ok(Some(chat_member_update_input(
+            update.id.0,
+            UpdateType::JoinRequest,
+            &request.chat,
+            &request.from,
+            request.date,
+            admin_user_ids,
+        ))),
         _ => Ok(None),
     }
 }
@@ -304,7 +331,38 @@ fn callback_update_input(
     }))
 }
 
+fn chat_member_update_input(
+    update_id: u32,
+    update_type: UpdateType,
+    chat: &Chat,
+    sender: &User,
+    received_at: chrono::DateTime<chrono::Utc>,
+    admin_user_ids: &[i64],
+) -> TelegramUpdateInput {
+    TelegramUpdateInput {
+        event_id: None,
+        update_id: u64::from(update_id),
+        update_type,
+        received_at,
+        execution_mode: crate::event::ExecutionMode::Realtime,
+        chat: chat_context_without_message(chat),
+        sender: Some(sender_context_from_user(sender, admin_user_ids)),
+        message: None,
+        reply: None,
+        callback: None,
+        locale: sender.language_code.clone(),
+        trace_id: None,
+        build: None,
+    }
+}
+
 fn chat_context(chat: &Chat, message: &Message) -> ChatContext {
+    let mut context = chat_context_without_message(chat);
+    context.thread_id = message_thread_id(message);
+    context
+}
+
+fn chat_context_without_message(chat: &Chat) -> ChatContext {
     let (chat_type, username) = match &chat.kind {
         ChatKind::Private(private) => ("private".to_owned(), private.username.clone()),
         ChatKind::Public(public) => match &public.kind {
@@ -319,7 +377,7 @@ fn chat_context(chat: &Chat, message: &Message) -> ChatContext {
         chat_type,
         title: chat.title().map(str::to_owned),
         username,
-        thread_id: message_thread_id(message),
+        thread_id: None,
     }
 }
 
@@ -592,6 +650,176 @@ mod tests {
                 .map(|callback| callback.from_user_id),
             Some(42)
         );
+    }
+
+    #[test]
+    fn chat_member_update_converts_and_normalizes() {
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432602,
+                "chat_member": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "date": 1721592582,
+                    "old_chat_member": {
+                        "user": {
+                            "first_name": "Bob",
+                            "id": 99,
+                            "is_bot": false,
+                            "username": "bob"
+                        },
+                        "status": "member"
+                    },
+                    "new_chat_member": {
+                        "user": {
+                            "first_name": "Bob",
+                            "id": 99,
+                            "is_bot": false,
+                            "username": "bob"
+                        },
+                        "status": "kicked",
+                        "until_date": 0
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let input = update_to_input_with_admin_user_ids(&update, &[42])
+            .expect("update converts")
+            .expect("update supported");
+        let event = EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("event normalizes");
+
+        assert_eq!(event.update_type, crate::event::UpdateType::ChatMember);
+        assert_eq!(
+            event.chat.as_ref().map(|chat| chat.id),
+            Some(-1001293752024)
+        );
+        assert_eq!(event.chat.as_ref().and_then(|chat| chat.thread_id), None);
+        assert_eq!(event.sender.as_ref().map(|sender| sender.id), Some(42));
+        assert_eq!(
+            event.sender.as_ref().map(|sender| sender.is_admin),
+            Some(true)
+        );
+        assert!(event.message.is_none());
+        assert!(event.callback.is_none());
+    }
+
+    #[test]
+    fn my_chat_member_update_converts_and_normalizes() {
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432603,
+                "my_chat_member": {
+                    "chat": {
+                        "id": 408258968,
+                        "first_name": "Hirrolot",
+                        "type": "private",
+                        "username": "hirrolot"
+                    },
+                    "from": {
+                        "first_name": "Hirrolot",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "ru",
+                        "username": "hirrolot"
+                    },
+                    "date": 1721592583,
+                    "old_chat_member": {
+                        "user": {
+                            "first_name": "Bot",
+                            "id": 999,
+                            "is_bot": true,
+                            "username": "sample_bot"
+                        },
+                        "status": "member"
+                    },
+                    "new_chat_member": {
+                        "user": {
+                            "first_name": "Bot",
+                            "id": 999,
+                            "is_bot": true,
+                            "username": "sample_bot"
+                        },
+                        "status": "kicked",
+                        "until_date": 0
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let input = update_to_input_with_admin_user_ids(&update, &[42])
+            .expect("update converts")
+            .expect("update supported");
+        let event = EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("event normalizes");
+
+        assert_eq!(event.update_type, crate::event::UpdateType::MyChatMember);
+        assert_eq!(event.chat.as_ref().map(|chat| chat.id), Some(408258968));
+        assert_eq!(event.sender.as_ref().map(|sender| sender.id), Some(42));
+        assert_eq!(event.system.locale.as_deref(), Some("ru"));
+        assert!(event.message.is_none());
+        assert!(event.callback.is_none());
+    }
+
+    #[test]
+    fn join_request_update_converts_and_normalizes() {
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432604,
+                "chat_join_request": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "from": {
+                        "first_name": "Carol",
+                        "id": 77,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "carol"
+                    },
+                    "user_chat_id": 5001,
+                    "date": 1721592584,
+                    "bio": "let me in"
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let input = update_to_input_with_admin_user_ids(&update, &[42])
+            .expect("update converts")
+            .expect("update supported");
+        let event = EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("event normalizes");
+
+        assert_eq!(event.update_type, crate::event::UpdateType::JoinRequest);
+        assert_eq!(
+            event.chat.as_ref().map(|chat| chat.id),
+            Some(-1001293752024)
+        );
+        assert_eq!(event.sender.as_ref().map(|sender| sender.id), Some(77));
+        assert_eq!(event.system.locale.as_deref(), Some("en"));
+        assert!(event.message.is_none());
+        assert!(event.callback.is_none());
     }
 
     #[tokio::test]
