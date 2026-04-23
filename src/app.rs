@@ -169,11 +169,9 @@ mod tests {
     #[tokio::test]
     async fn startup_and_shutdown_transition_application_to_stopped() {
         let (_dir, config) = app_test_config();
-        let mut app = Application::from_config_with_shutdown(
-            config,
-            ShutdownController::immediate(),
-        )
-        .expect("application builds");
+        let mut app =
+            Application::from_config_with_shutdown(config, ShutdownController::immediate())
+                .expect("application builds");
         assert_eq!(app.state.lifecycle, LifecycleState::Created);
 
         app.startup().await.expect("startup succeeds");
@@ -235,11 +233,9 @@ mod tests {
     #[tokio::test]
     async fn application_run_with_immediate_shutdown_reaches_stopped_state() {
         let (_dir, config) = app_test_config();
-        let mut app = Application::from_config_with_shutdown(
-            config,
-            ShutdownController::immediate(),
-        )
-        .expect("application builds");
+        let mut app =
+            Application::from_config_with_shutdown(config, ShutdownController::immediate())
+                .expect("application builds");
 
         app.run().await.expect("application run succeeds");
 
@@ -261,11 +257,9 @@ mod tests {
         let mut config = AppConfig::default();
         config.paths.database_path = database_path;
 
-        let mut app = Application::from_config_with_shutdown(
-            config,
-            ShutdownController::immediate(),
-        )
-        .expect("application builds");
+        let mut app =
+            Application::from_config_with_shutdown(config, ShutdownController::immediate())
+                .expect("application builds");
 
         let error = app.startup().await.expect_err("startup must fail");
         assert!(error.to_string().contains("failed to bootstrap runtime"));
@@ -274,11 +268,9 @@ mod tests {
     #[tokio::test]
     async fn startup_wires_router_and_host_api_into_runtime() {
         let (_dir, config) = app_test_config();
-        let mut app = Application::from_config_with_shutdown(
-            config,
-            ShutdownController::immediate(),
-        )
-        .expect("application builds");
+        let mut app =
+            Application::from_config_with_shutdown(config, ShutdownController::immediate())
+                .expect("application builds");
 
         app.startup().await.expect("startup succeeds");
 
