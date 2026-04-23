@@ -61,6 +61,7 @@ impl Runtime {
             .without_processed_update_guard();
         let router = Rc::new(
             ExecutionRouter::new()
+                .with_registry(self.registry.clone())
                 .with_index(RouterIndex::from_registry(&self.registry))
                 .with_moderation(moderation),
         );

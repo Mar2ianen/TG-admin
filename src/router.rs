@@ -6,6 +6,7 @@ use crate::event::{
 };
 use crate::moderation::{ModerationEngine, ModerationError, ModerationEventResult};
 use crate::unit::{TriggerSpec, UnitEventType, UnitRegistry, UnitStatus};
+use regex::Regex;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct EventClassifier;
@@ -356,6 +357,7 @@ pub struct ExecutionRouter {
     classifier: EventClassifier,
     index: RouterIndex,
     moderation: Option<ModerationEngine>,
+    registry: UnitRegistry,
 }
 
 impl ExecutionRouter {
@@ -364,6 +366,7 @@ impl ExecutionRouter {
             classifier: EventClassifier::new(),
             index: RouterIndex::default(),
             moderation: None,
+            registry: UnitRegistry::default(),
         }
     }
 
@@ -374,6 +377,12 @@ impl ExecutionRouter {
 
     pub fn with_moderation(mut self, moderation: ModerationEngine) -> Self {
         self.moderation = Some(moderation);
+        self
+    }
+
+    pub fn with_registry(mut self, registry: UnitRegistry) -> Self {
+        self.index = RouterIndex::from_registry(&registry);
+        self.registry = registry;
         self
     }
 
@@ -405,7 +414,10 @@ impl ExecutionRouter {
         }
 
         if plan.lanes.contains(&ExecutionLane::UnitDispatch) {
-            return Ok(ExecutionOutcome::Unhandled(plan));
+            let invocations = select_unit_dispatches(&self.registry, event);
+            if !invocations.is_empty() {
+                return Ok(ExecutionOutcome::UnitDispatch { plan, invocations });
+            }
         }
 
         Ok(ExecutionOutcome::Unhandled(plan))
@@ -450,7 +462,26 @@ pub enum ExecutionOutcome {
         result: ModerationEventResult,
         deferred_lanes: Vec<ExecutionLane>,
     },
+    UnitDispatch {
+        plan: RoutePlan,
+        invocations: Vec<UnitDispatchInvocation>,
+    },
     Unhandled(RoutePlan),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UnitDispatchInvocation {
+    pub unit_id: String,
+    pub exec_start: String,
+    pub entry_point: Option<String>,
+    pub trigger: UnitDispatchTrigger,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum UnitDispatchTrigger {
+    Command { command: String },
+    Regex { pattern: String },
+    EventType { event: UnitEventType },
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -591,11 +622,91 @@ fn deferred_lanes(plan: &RoutePlan, executed_lane: ExecutionLane) -> Vec<Executi
         .collect()
 }
 
+fn select_unit_dispatches(
+    registry: &UnitRegistry,
+    event: &EventContext,
+) -> Vec<UnitDispatchInvocation> {
+    registry
+        .entries()
+        .iter()
+        .filter(|descriptor| matches!(descriptor.status, UnitStatus::Loaded | UnitStatus::Active))
+        .filter_map(|descriptor| {
+            let manifest = descriptor.manifest.as_ref()?;
+            let trigger = match_trigger(&manifest.trigger, event)?;
+
+            Some(UnitDispatchInvocation {
+                unit_id: descriptor.id.clone(),
+                exec_start: manifest.service.exec_start.clone(),
+                entry_point: manifest.service.entry_point.clone(),
+                trigger,
+            })
+        })
+        .collect()
+}
+
+fn match_trigger(trigger: &TriggerSpec, event: &EventContext) -> Option<UnitDispatchTrigger> {
+    match trigger {
+        TriggerSpec::Command { commands } => {
+            let command = extract_command_name(event)?;
+            commands
+                .iter()
+                .find(|candidate| candidate.trim().eq_ignore_ascii_case(&command))
+                .map(|_| UnitDispatchTrigger::Command { command })
+        }
+        TriggerSpec::Regex { pattern } => {
+            let haystack = trigger_text(event)?;
+            Regex::new(pattern)
+                .ok()
+                .filter(|regex| regex.is_match(haystack))
+                .map(|_| UnitDispatchTrigger::Regex {
+                    pattern: pattern.clone(),
+                })
+        }
+        TriggerSpec::EventType { events } => {
+            let unit_event = unit_event_type_for(event.update_type)?;
+            events
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == unit_event)
+                .map(|event| UnitDispatchTrigger::EventType { event })
+        }
+    }
+}
+
+fn trigger_text(event: &EventContext) -> Option<&str> {
+    event
+        .message
+        .as_ref()
+        .and_then(|message| message.text.as_deref())
+        .or_else(|| {
+            event
+                .callback
+                .as_ref()
+                .and_then(|callback| callback.data.as_deref())
+        })
+}
+
+fn unit_event_type_for(update_type: UpdateType) -> Option<UnitEventType> {
+    match update_type {
+        UpdateType::Message
+        | UpdateType::EditedMessage
+        | UpdateType::ChannelPost
+        | UpdateType::EditedChannelPost => Some(UnitEventType::Message),
+        UpdateType::CallbackQuery => Some(UnitEventType::CallbackQuery),
+        UpdateType::Job => Some(UnitEventType::Job),
+        UpdateType::ChatMember
+        | UpdateType::MyChatMember
+        | UpdateType::JoinRequest
+        | UpdateType::System => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AuthorKind, ChatScope, EventClassifier, EventTrait, ExecutionLane, ExecutionOutcome,
         ExecutionRouter, IngressClass, RouteBucket, RouterIndex, RoutingError,
+        UnitDispatchInvocation, UnitDispatchTrigger,
     };
     use crate::event::{
         CallbackContext, ChatContext, EventContext, EventNormalizer, ExecutionMode,
@@ -1059,9 +1170,10 @@ mod tests {
             TriggerSpec::command(["warn"]),
             ServiceSpec::new("scripts/moderation/warn_shadow.rhai"),
         );
-        let router = router_with_moderation().with_index(RouterIndex::from_registry(
-            &registry_from_manifests(vec![unit_manifest]),
-        ));
+        let registry = registry_from_manifests(vec![unit_manifest]);
+        let router = router_with_moderation()
+            .with_registry(registry.clone())
+            .with_index(RouterIndex::from_registry(&registry));
         let mut event = manual_event("/warn @spam spam");
         event.reply = Some(crate::event::ReplyContext {
             message_id: 900,
@@ -1091,6 +1203,104 @@ mod tests {
         );
         assert_eq!(deferred_lanes, vec![ExecutionLane::UnitDispatch]);
         assert!(matches!(result, ModerationEventResult::Executed(_)));
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_matching_command_units_with_service_envelope() {
+        let mut manifest = UnitManifest::new(
+            UnitDefinition::new("moderation.stats.audit"),
+            TriggerSpec::command(["stats", "audit_stats"]),
+            ServiceSpec::new("scripts/moderation/stats_audit.rhai"),
+        );
+        manifest.service.entry_point = Some("handle_stats".to_owned());
+        let router = ExecutionRouter::new().with_registry(registry_from_manifests(vec![manifest]));
+
+        let outcome = router
+            .route(&manual_event("/stats"))
+            .await
+            .expect("routing succeeds");
+
+        let ExecutionOutcome::UnitDispatch { plan, invocations } = outcome else {
+            panic!("expected unit dispatch outcome");
+        };
+        assert_eq!(plan.lanes, vec![ExecutionLane::UnitDispatch]);
+        assert_eq!(
+            invocations,
+            vec![UnitDispatchInvocation {
+                unit_id: "moderation.stats.audit".to_owned(),
+                exec_start: "scripts/moderation/stats_audit.rhai".to_owned(),
+                entry_point: Some("handle_stats".to_owned()),
+                trigger: UnitDispatchTrigger::Command {
+                    command: "stats".to_owned(),
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_matching_regex_units_only_when_pattern_matches() {
+        let matching = UnitManifest::new(
+            UnitDefinition::new("message.link.filter"),
+            TriggerSpec::regex("https?://"),
+            ServiceSpec::new("scripts/filter/link.rhai"),
+        );
+        let non_matching = UnitManifest::new(
+            UnitDefinition::new("message.phone.filter"),
+            TriggerSpec::regex("\\+\\d{11}"),
+            ServiceSpec::new("scripts/filter/phone.rhai"),
+        );
+        let router = ExecutionRouter::new()
+            .with_registry(registry_from_manifests(vec![matching, non_matching]));
+
+        let outcome = router
+            .route(&realtime_text_event("visit https://example.com now"))
+            .await
+            .expect("routing succeeds");
+
+        let ExecutionOutcome::UnitDispatch { invocations, .. } = outcome else {
+            panic!("expected unit dispatch outcome");
+        };
+        assert_eq!(
+            invocations,
+            vec![UnitDispatchInvocation {
+                unit_id: "message.link.filter".to_owned(),
+                exec_start: "scripts/filter/link.rhai".to_owned(),
+                entry_point: None,
+                trigger: UnitDispatchTrigger::Regex {
+                    pattern: "https?://".to_owned(),
+                },
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn router_dispatches_matching_event_type_units() {
+        let manifest = UnitManifest::new(
+            UnitDefinition::new("callback.resolve"),
+            TriggerSpec::event_type([UnitEventType::CallbackQuery]),
+            ServiceSpec::new("scripts/callback/resolve.rhai"),
+        );
+        let router = ExecutionRouter::new().with_registry(registry_from_manifests(vec![manifest]));
+
+        let outcome = router
+            .route(&callback_event("resolve:123"))
+            .await
+            .expect("routing succeeds");
+
+        let ExecutionOutcome::UnitDispatch { invocations, .. } = outcome else {
+            panic!("expected unit dispatch outcome");
+        };
+        assert_eq!(
+            invocations,
+            vec![UnitDispatchInvocation {
+                unit_id: "callback.resolve".to_owned(),
+                exec_start: "scripts/callback/resolve.rhai".to_owned(),
+                entry_point: None,
+                trigger: UnitDispatchTrigger::EventType {
+                    event: UnitEventType::CallbackQuery,
+                },
+            }]
+        );
     }
 
     #[tokio::test]
