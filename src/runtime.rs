@@ -1,6 +1,7 @@
 use crate::audit::AuditService;
 use crate::config::AppConfig;
 use crate::host_api::HostApi;
+use crate::host_api::MlServerTransport;
 use crate::ingress::IngressPipeline;
 use crate::moderation::ModerationEngine;
 use crate::router::{ExecutionRouter, RouterIndex};
@@ -54,7 +55,8 @@ impl Runtime {
         let registry_handle = std::rc::Rc::new(self.registry.clone());
         let host_api = HostApi::new(false)
             .with_storage(host_api_storage)
-            .with_unit_registry_handle(registry_handle.clone());
+            .with_unit_registry_handle(registry_handle.clone())
+            .with_ml_server_transport(self.services.ml_server_transport.clone());
         let moderation = ModerationEngine::new(moderation_storage, self.services.telegram.clone())
             .with_unit_registry_handle(registry_handle)
             .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
@@ -134,6 +136,7 @@ struct RuntimeServices {
     scheduler: Scheduler,
     telegram: TelegramGateway,
     polling_bot: Option<teloxide_core::Bot>,
+    ml_server_transport: MlServerTransport,
 }
 
 impl RuntimeServices {
@@ -150,6 +153,8 @@ impl RuntimeServices {
                     .with_transport(TeloxideCoreTransport::new(token.to_owned())),
                 None => TelegramGateway::new(config.telegram.polling),
             },
+            ml_server_transport: MlServerTransport::new(config.ml_server.base_url.clone())
+                .context("failed to configure ml server transport")?,
             polling_bot: match (
                 config.telegram.polling,
                 config.telegram.bot_token.as_deref(),

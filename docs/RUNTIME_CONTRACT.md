@@ -40,6 +40,7 @@
 - Runtime-wide dry-run toggle в конфиге сейчас нет.
 - На startup `HostApi` создается с `dry_run = false`.
 - Dry-run semantics существуют на уровне отдельных execution paths и команд, но не как глобальный runtime mode.
+- `ml_server.base_url` централизованно задает default live endpoint for `HostApi` ML transport.
 - `runtime.manual_mode_enabled` и `runtime.reload_enabled` уже есть в конфиге, но текущий startup path не меняет из-за них runtime behavior.
 - `runtime.degraded_mode_enabled` сейчас влияет только на policy загрузки unit manifests.
 
@@ -53,9 +54,9 @@
 ## ML Server Contract
 
 - В `HostApi` уже есть typed contract layer для `ml-server`: health, embeddings, chat completions и models list.
-- Это пока именно contract surface, а не подключенный runtime transport.
-- В `dry_run` эти операции возвращают planning metadata.
-- В обычном runtime path они пока завершаются structured `ResourceUnavailable` с ресурсом `ml_server_transport`.
+- Runtime now wires live HTTP transport for health and models list; embed/chat still follow the existing unavailable path.
+- В `dry_run` health/models возвращают planning metadata с resolved base URL и empty/live-safe payloads.
+- В обычном runtime path health/models делают real HTTP calls against `ml_server.base_url`, unless request-level `base_url` overrides it.
 - Детали surface и capability names зафиксированы в [docs/ML_SERVER_CONTRACT.md](/home/arch/Документы/Teloxide/docs/ML_SERVER_CONTRACT.md:1).
 
 ## Local Run

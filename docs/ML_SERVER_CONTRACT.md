@@ -5,8 +5,8 @@
 Важно:
 
 - это уже typed contract в `HostApi`
-- это еще не runtime transport
-- реальный HTTP вызов к `ml-server` пока не wired
+- runtime transport wired только для `MlHealth` и `MlModels`
+- `MlEmbedText` и `MlChatCompletions` пока остаются on the existing unavailable path
 
 ## Что уже есть
 
@@ -45,7 +45,7 @@ Allow-list валиден на уровне unit schema: [src/unit.rs](/home/arc
 
 `base_url` опционален специально:
 
-- можно оставить `None`, если future runtime later привяжет endpoint централизованно
+- можно оставить `None`, если runtime должен взять `ml_server.base_url` из config
 - можно передавать конкретный URL явно, если caller хочет полный control contract уже сейчас
 
 ## Current Semantics
@@ -55,15 +55,14 @@ Allow-list валиден на уровне unit schema: [src/unit.rs](/home/arc
 - request проходит через `EventContext` validation
 - request проходит через capability gate
 - request проходит через базовую field validation
-- при `HostApi::dry_run() == true` caller получает typed planning response
-- при обычном режиме операция завершается structured error:
-  - `HostApiErrorKind::Internal`
-  - `HostApiErrorDetail::ResourceUnavailable { resource: "ml_server_transport" }`
+- при `HostApi::dry_run() == true` health/models возвращают typed planning response
+- при обычном режиме health/models делают real HTTP call to resolved `base_url`
+- embed/chat still завершаются structured `ResourceUnavailable` с ресурсом `ml_server_transport`
 
 Это означает:
 
 - contract уже можно использовать в unit/plugin codegen и tests
-- runtime пока не делает ложный вид, что ML transport уже реально подключен
+- runtime теперь делает real HTTP calls for the first useful slice, without pretending the whole ML surface is done
 
 ## Planning Responses
 
@@ -71,12 +70,29 @@ Dry-run path сейчас возвращает planning metadata вместо fa
 
 Примеры:
 
-- `MlHealthValue { base_url, transport_ready: false }`
+- `MlHealthValue { base_url, resolved_base_url, status: None, provider: None, model: None, transport_ready: false }`
 - `MlEmbedTextValue { base_url, model, input_count, transport_ready: false }`
 - `MlChatCompletionsValue { base_url, model, message_count, max_tokens, transport_ready: false }`
-- `MlModelsValue { base_url, transport_ready: false }`
+- `MlModelsValue { base_url, resolved_base_url, models: [], transport_ready: false }`
 
 То есть dry-run уже дает удобный typed envelope, но не подделывает embeddings, models list или LLM answer.
+
+## Live Values
+
+В live path `MlHealthValue` теперь carries:
+
+- `status`
+- `provider`
+- `model`
+
+В live path `MlModelsValue` теперь carries typed model summaries:
+
+- `id`
+- `object`
+- `owned_by`
+- `created`
+
+Это минимальный полезный mapping на текущий `ml-server` response surface.
 
 ## Practical Use
 
@@ -95,9 +111,6 @@ Dry-run path сейчас возвращает planning metadata вместо fa
 
 Пока еще нет:
 
-- runtime config binding для default `ml-server` base URL
-- реального HTTP client path внутри `HostApi`
-- typed translation из реального `ml-server` JSON в final runtime values
 - replay/dry-run policy поверх реального ML transport
 
 Это уже следующий шаг после нынешнего contract slice.

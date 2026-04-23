@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub paths: PathsConfig,
     pub storage: StorageConfig,
     pub runtime: RuntimeConfig,
+    pub ml_server: MlServerConfig,
     pub limits: LimitsConfig,
     pub fetch_policy: FetchPolicyConfig,
     pub scheduler: SchedulerConfig,
@@ -60,6 +61,20 @@ impl AppConfig {
             temp_store: TempStoreMode::Memory,
             foreign_keys: true,
         })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MlServerConfig {
+    pub base_url: String,
+}
+
+impl Default for MlServerConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:11434".to_owned(),
+        }
     }
 }
 
@@ -352,6 +367,9 @@ reload_enabled = false
 manual_mode_enabled = true
 degraded_mode_enabled = false
 
+[ml_server]
+base_url = "http://127.0.0.1:11434"
+
 [limits]
 max_message_text_bytes = 100
 max_caption_bytes = 101
@@ -400,6 +418,7 @@ bloom_prefilter = false
 
         assert_eq!(config.telegram.bot_token.as_deref(), Some("token"));
         assert_eq!(config.runtime.tokio_worker_threads, Some(2));
+        assert_eq!(config.ml_server.base_url, "http://127.0.0.1:11434");
         assert_eq!(config.observability.log_level, "debug");
         assert!(!config.features.hot_reload);
 
@@ -427,6 +446,7 @@ log_level = "warn"
         assert_eq!(config.observability.log_level, "warn");
         assert!(config.telegram.polling);
         assert_eq!(config.storage.sqlite_journal_mode, "WAL");
+        assert_eq!(config.ml_server.base_url, "http://localhost:11434");
         assert!(config.observability.json_logs);
 
         let _ = fs::remove_file(&path);

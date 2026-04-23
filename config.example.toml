@@ -36,6 +36,10 @@ manual_mode_enabled = false
 # Used when loading unit manifests from paths.units_dir.
 degraded_mode_enabled = true
 
+[ml_server]
+# Default base URL for live ml-server transport. Individual requests can still override it.
+base_url = "http://localhost:11434"
+
 [limits]
 max_message_text_bytes = 16384
 max_caption_bytes = 4096

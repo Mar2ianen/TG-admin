@@ -17,6 +17,7 @@
 - текущий runtime path уже включает `Runtime`, `ExecutionRouter`, `IngressPipeline`, polling ingest loop и live `teloxide-core` transport при наличии `bot_token`
 - built-in moderation все еще остается основной реально работающей execution lane; unit-driven execution lane end-to-end еще не собран
 - built-in command scope в коде: `/warn`, `/mute`, `/ban`, `/del`, `/undo`, `/msg`
+- `ml_server.base_url` задает default live endpoint для `HostApi` ML transport; request-level `base_url` может его переопределять
 - целевая routing model разделяет ingress classes (`realtime | recovery | scheduled | manual`), update traits и отдельный command index
 - целевая модель — не плоский перебор handlers, а indexed/bucketed routing через `classify -> dispatch set -> execution lane`
 

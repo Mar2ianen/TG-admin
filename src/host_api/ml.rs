@@ -1,9 +1,14 @@
 use super::{
-    validate_event, validate_non_empty, HostApi, HostApiError, HostApiErrorDetail,
-    HostApiOperation, HostApiResponse,
+    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, validate_event,
+    validate_non_empty,
 };
 use crate::event::EventContext;
+use anyhow::Context;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::time::Duration;
+use url::Url;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MlHealthRequest {
@@ -39,6 +44,10 @@ pub struct MlChatMessage {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MlHealthValue {
     pub base_url: Option<String>,
+    pub resolved_base_url: Option<String>,
+    pub status: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
     pub transport_ready: bool,
 }
 
@@ -60,9 +69,173 @@ pub struct MlChatCompletionsValue {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlModelInfo {
+    pub id: String,
+    pub object: Option<String>,
+    pub owned_by: Option<String>,
+    pub created: Option<u64>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MlModelsValue {
     pub base_url: Option<String>,
+    pub resolved_base_url: Option<String>,
+    pub models: Vec<MlModelInfo>,
     pub transport_ready: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MlServerTransport {
+    client: Client,
+    default_base_url: Url,
+}
+
+impl MlServerTransport {
+    pub fn new(default_base_url: impl AsRef<str>) -> anyhow::Result<Self> {
+        let default_base_url = Url::parse(default_base_url.as_ref()).with_context(|| {
+            format!("invalid ml server base url `{}`", default_base_url.as_ref())
+        })?;
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .context("failed to build ml server HTTP client")?;
+
+        Ok(Self {
+            client,
+            default_base_url,
+        })
+    }
+
+    fn resolve_base_url(
+        &self,
+        override_base_url: Option<&str>,
+        operation: HostApiOperation,
+    ) -> Result<Url, HostApiError> {
+        match override_base_url {
+            Some(base_url) => parse_base_url(base_url, operation),
+            None => Ok(self.default_base_url.clone()),
+        }
+    }
+
+    pub fn health(
+        &self,
+        base_url: Option<&str>,
+        operation: HostApiOperation,
+    ) -> Result<MlHealthValue, HostApiError> {
+        let client = self.client.clone();
+        let resolved_base_url = self.resolve_base_url(base_url, operation)?;
+        let base_url = base_url.map(ToOwned::to_owned);
+        run_request(async move {
+            let url = join_path(&resolved_base_url, "health", operation)?;
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .map_err(|error| transport_error(operation, error.to_string()))?;
+
+            if !response.status().is_success() {
+                return Err(transport_error(
+                    operation,
+                    format!("ml server returned HTTP {}", response.status()),
+                ));
+            }
+
+            let body = response
+                .json::<MlHealthResponse>()
+                .await
+                .map_err(|error| transport_error(operation, error.to_string()))?;
+
+            Ok(ml_health_value(
+                base_url.as_deref(),
+                resolved_base_url,
+                body,
+                true,
+            ))
+        })
+    }
+
+    pub fn models(
+        &self,
+        base_url: Option<&str>,
+        operation: HostApiOperation,
+    ) -> Result<MlModelsValue, HostApiError> {
+        let client = self.client.clone();
+        let resolved_base_url = self.resolve_base_url(base_url, operation)?;
+        let base_url = base_url.map(ToOwned::to_owned);
+        run_request(async move {
+            let url = join_path(&resolved_base_url, "v1/models", operation)?;
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .map_err(|error| transport_error(operation, error.to_string()))?;
+
+            if !response.status().is_success() {
+                return Err(transport_error(
+                    operation,
+                    format!("ml server returned HTTP {}", response.status()),
+                ));
+            }
+
+            let body = response
+                .json::<MlModelsResponse>()
+                .await
+                .map_err(|error| transport_error(operation, error.to_string()))?;
+
+            Ok(ml_models_value(
+                base_url.as_deref(),
+                resolved_base_url,
+                body,
+                true,
+            ))
+        })
+    }
+}
+
+fn run_request<T>(future: impl Future<Output = T> + Send + 'static) -> T
+where
+    T: Send + 'static,
+{
+    if std::thread::panicking() {
+        panic!("cannot execute ml transport while panicking");
+    }
+
+    let runner = move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build ml server runtime");
+        runtime.block_on(future)
+    };
+
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(runner)
+            .join()
+            .expect("ml server transport thread panicked")
+    } else {
+        runner()
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlHealthResponse {
+    pub status: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlModelResponse {
+    pub id: String,
+    pub object: Option<String>,
+    pub owned_by: Option<String>,
+    pub created: Option<u64>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlModelsResponse {
+    #[serde(default)]
+    pub data: Vec<MlModelResponse>,
 }
 
 impl HostApi {
@@ -75,15 +248,33 @@ impl HostApi {
         self.require_operation_capability(event, HostApiOperation::MlHealth)?;
         validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlHealth)?;
 
-        let value = MlHealthValue {
-            base_url: request.base_url,
-            transport_ready: false,
-        };
         if self.dry_run() {
+            let value = MlHealthValue {
+                base_url: request.base_url.clone(),
+                resolved_base_url: self
+                    .ml_transport(HostApiOperation::MlHealth)
+                    .ok()
+                    .and_then(|transport| {
+                        transport
+                            .resolve_base_url(
+                                request.base_url.as_deref(),
+                                HostApiOperation::MlHealth,
+                            )
+                            .ok()
+                    })
+                    .map(|url| url.to_string())
+                    .or(request.base_url.clone()),
+                status: None,
+                provider: None,
+                model: None,
+                transport_ready: false,
+            };
             return Ok(self.response(HostApiOperation::MlHealth, value));
         }
 
-        Err(ml_runtime_unavailable(HostApiOperation::MlHealth))
+        let transport = self.ml_transport(HostApiOperation::MlHealth)?;
+        let value = transport.health(request.base_url.as_deref(), HostApiOperation::MlHealth)?;
+        Ok(self.response(HostApiOperation::MlHealth, value))
     }
 
     pub fn ml_embed_text(
@@ -145,15 +336,95 @@ impl HostApi {
         self.require_operation_capability(event, HostApiOperation::MlModels)?;
         validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlModels)?;
 
-        let value = MlModelsValue {
-            base_url: request.base_url,
-            transport_ready: false,
-        };
         if self.dry_run() {
+            let value = MlModelsValue {
+                base_url: request.base_url.clone(),
+                resolved_base_url: self
+                    .ml_transport(HostApiOperation::MlModels)
+                    .ok()
+                    .and_then(|transport| {
+                        transport
+                            .resolve_base_url(
+                                request.base_url.as_deref(),
+                                HostApiOperation::MlModels,
+                            )
+                            .ok()
+                    })
+                    .map(|url| url.to_string())
+                    .or(request.base_url.clone()),
+                models: Vec::new(),
+                transport_ready: false,
+            };
             return Ok(self.response(HostApiOperation::MlModels, value));
         }
 
-        Err(ml_runtime_unavailable(HostApiOperation::MlModels))
+        let transport = self.ml_transport(HostApiOperation::MlModels)?;
+        let value = transport.models(request.base_url.as_deref(), HostApiOperation::MlModels)?;
+        Ok(self.response(HostApiOperation::MlModels, value))
+    }
+}
+
+fn parse_base_url(value: &str, operation: HostApiOperation) -> Result<Url, HostApiError> {
+    Url::parse(value).map_err(|error| {
+        HostApiError::validation(
+            operation,
+            HostApiErrorDetail::InvalidField {
+                field: "base_url".to_owned(),
+                message: format!("must be an absolute URL: {error}"),
+            },
+        )
+    })
+}
+
+fn join_path(base_url: &Url, path: &str, operation: HostApiOperation) -> Result<Url, HostApiError> {
+    base_url.join(path).map_err(|error| {
+        HostApiError::internal(
+            operation,
+            HostApiErrorDetail::InternalConversionFailure {
+                message: format!("failed to build ml request url: {error}"),
+            },
+        )
+    })
+}
+
+fn ml_health_value(
+    base_url: Option<&str>,
+    resolved_base_url: Url,
+    body: MlHealthResponse,
+    transport_ready: bool,
+) -> MlHealthValue {
+    MlHealthValue {
+        base_url: base_url.map(ToOwned::to_owned),
+        resolved_base_url: Some(resolved_base_url.to_string()),
+        status: body.status,
+        provider: body.provider,
+        model: body.model,
+        transport_ready,
+    }
+}
+
+fn ml_models_value(
+    base_url: Option<&str>,
+    resolved_base_url: Url,
+    body: MlModelsResponse,
+    transport_ready: bool,
+) -> MlModelsValue {
+    let models = body
+        .data
+        .into_iter()
+        .map(|model| MlModelInfo {
+            id: model.id,
+            object: model.object,
+            owned_by: model.owned_by,
+            created: model.created,
+        })
+        .collect();
+
+    MlModelsValue {
+        base_url: base_url.map(ToOwned::to_owned),
+        resolved_base_url: Some(resolved_base_url.to_string()),
+        models,
+        transport_ready,
     }
 }
 
@@ -163,6 +434,7 @@ fn validate_optional_base_url(
 ) -> Result<(), HostApiError> {
     if let Some(value) = base_url {
         validate_non_empty(value, "base_url", operation)?;
+        parse_base_url(value, operation)?;
     }
 
     Ok(())
@@ -226,6 +498,13 @@ fn ml_runtime_unavailable(operation: HostApiOperation) -> HostApiError {
     )
 }
 
+fn transport_error(operation: HostApiOperation, message: String) -> HostApiError {
+    HostApiError::internal(
+        operation,
+        HostApiErrorDetail::InternalConversionFailure { message },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +558,7 @@ mod tests {
         allow: &[&str],
         deny: &[&str],
         dry_run: bool,
+        with_transport: bool,
     ) -> (TempDir, HostApi) {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
         let path = dir.path().join("host-api.sqlite3");
@@ -297,16 +577,21 @@ mod tests {
         };
         let registry = UnitRegistry::load_manifests(vec![manifest]).registry;
 
-        let api = HostApi::new(dry_run)
+        let mut api = HostApi::new(dry_run)
             .with_storage(storage)
             .with_unit_registry(registry);
+        if with_transport {
+            let transport = MlServerTransport::new("http://127.0.0.1:11434")
+                .expect("default ml server transport");
+            api = api.with_ml_server_transport(transport);
+        }
         (dir, api)
     }
 
     #[test]
     fn ml_embed_text_dry_run_returns_planned_contract_value() {
         let event = manual_event();
-        let (_dir, api) = storage_api_with_registry(&["ml.embed_text"], &[], true);
+        let (_dir, api) = storage_api_with_registry(&["ml.embed_text"], &[], true, true);
 
         let response = api
             .ml_embed_text(
@@ -328,7 +613,7 @@ mod tests {
     #[test]
     fn ml_chat_completion_denies_without_capability() {
         let event = manual_event();
-        let (_dir, api) = storage_api_with_registry(&["ml.embed_text"], &[], false);
+        let (_dir, api) = storage_api_with_registry(&["ml.embed_text"], &[], false, false);
 
         let error = api
             .ml_chat_completions(
@@ -358,7 +643,7 @@ mod tests {
     #[test]
     fn ml_health_returns_structured_unavailable_error_when_transport_is_not_wired() {
         let event = manual_event();
-        let (_dir, api) = storage_api_with_registry(&["ml.health.read"], &[], false);
+        let (_dir, api) = storage_api_with_registry(&["ml.health.read"], &[], false, false);
 
         let error = api
             .ml_health(
@@ -380,9 +665,116 @@ mod tests {
     }
 
     #[test]
+    fn ml_health_dry_run_uses_default_base_url_binding() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["ml.health.read"], &[], true, true);
+
+        let response = api
+            .ml_health(&event, MlHealthRequest { base_url: None })
+            .expect("dry-run health succeeds");
+
+        assert_eq!(response.operation, HostApiOperation::MlHealth);
+        assert!(response.dry_run);
+        assert_eq!(
+            response.value.resolved_base_url.as_deref(),
+            Some("http://127.0.0.1:11434/")
+        );
+        assert!(!response.value.transport_ready);
+        assert!(response.value.status.is_none());
+    }
+
+    #[test]
+    fn ml_health_live_translation_returns_server_metadata() {
+        let value = ml_health_value(
+            Some("http://localhost:11434"),
+            Url::parse("http://localhost:11434").expect("url"),
+            MlHealthResponse {
+                status: Some("ok".to_owned()),
+                provider: Some("local".to_owned()),
+                model: Some("sentence-transformers/all-MiniLM-L6-v2".to_owned()),
+            },
+            true,
+        );
+
+        assert_eq!(value.base_url.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(
+            value.resolved_base_url.as_deref(),
+            Some("http://localhost:11434/")
+        );
+        assert_eq!(value.status.as_deref(), Some("ok"));
+        assert_eq!(value.provider.as_deref(), Some("local"));
+        assert_eq!(
+            value.model.as_deref(),
+            Some("sentence-transformers/all-MiniLM-L6-v2")
+        );
+        assert!(value.transport_ready);
+    }
+
+    #[test]
+    fn ml_models_dry_run_returns_planned_model_list_envelope() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["ml.models.read"], &[], true, true);
+
+        let response = api
+            .ml_models(&event, MlModelsRequest { base_url: None })
+            .expect("dry-run models succeeds");
+
+        assert_eq!(response.operation, HostApiOperation::MlModels);
+        assert!(response.dry_run);
+        assert_eq!(
+            response.value.resolved_base_url.as_deref(),
+            Some("http://127.0.0.1:11434/")
+        );
+        assert!(response.value.models.is_empty());
+        assert!(!response.value.transport_ready);
+    }
+
+    #[test]
+    fn ml_models_live_translation_returns_model_summaries() {
+        let value = ml_models_value(
+            Some("http://localhost:11434"),
+            Url::parse("http://localhost:11434").expect("url"),
+            MlModelsResponse {
+                data: vec![
+                    MlModelResponse {
+                        id: "sentence-transformers/all-MiniLM-L6-v2".to_owned(),
+                        object: Some("model".to_owned()),
+                        owned_by: Some("local".to_owned()),
+                        created: Some(123),
+                    },
+                    MlModelResponse {
+                        id: "meta-llama/llama-3.1-70b-instruct".to_owned(),
+                        object: Some("model".to_owned()),
+                        owned_by: Some("openrouter".to_owned()),
+                        created: None,
+                    },
+                ],
+            },
+            true,
+        );
+
+        assert_eq!(value.base_url.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(
+            value.resolved_base_url.as_deref(),
+            Some("http://localhost:11434/")
+        );
+        assert_eq!(value.models.len(), 2);
+        assert_eq!(
+            value.models[0],
+            MlModelInfo {
+                id: "sentence-transformers/all-MiniLM-L6-v2".to_owned(),
+                object: Some("model".to_owned()),
+                owned_by: Some("local".to_owned()),
+                created: Some(123),
+            }
+        );
+        assert!(value.transport_ready);
+    }
+
+    #[test]
     fn ml_models_request_routes_through_generic_host_api_call() {
         let event = manual_event();
-        let (_dir, api) = storage_api_with_registry(&["ml.models.read"], &[], true);
+        let (_dir, api) = storage_api_with_registry(&["ml.models.read"], &[], true, true);
 
         let response = api
             .call(
@@ -394,7 +786,10 @@ mod tests {
         assert_eq!(response.operation, HostApiOperation::MlModels);
         assert!(response.dry_run);
         match response.value {
-            HostApiValue::MlModels(value) => assert!(!value.transport_ready),
+            HostApiValue::MlModels(value) => {
+                assert!(!value.transport_ready);
+                assert!(value.models.is_empty());
+            }
             other => panic!("unexpected host api value: {other:?}"),
         }
     }

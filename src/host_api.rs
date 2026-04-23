@@ -29,7 +29,8 @@ pub use contract::{
 pub use error::{HostApiError, HostApiErrorDetail, HostApiErrorKind};
 pub use ml::{
     MlChatCompletionsRequest, MlChatCompletionsValue, MlChatMessage, MlEmbedTextRequest,
-    MlEmbedTextValue, MlHealthRequest, MlHealthValue, MlModelsRequest, MlModelsValue,
+    MlEmbedTextValue, MlHealthRequest, MlHealthValue, MlModelInfo, MlModelsRequest, MlModelsValue,
+    MlServerTransport,
 };
 pub(crate) use validation::{
     apply_user_patch, execution_mode_label, required_capability, storage_error, to_rfc3339,
@@ -48,6 +49,7 @@ pub struct HostApi {
     target_parser: TargetSelectorParser,
     duration_parser: DurationParser,
     aliases: ReasonAliasRegistry,
+    ml_transport: Option<MlServerTransport>,
 }
 
 impl HostApi {
@@ -59,11 +61,17 @@ impl HostApi {
             target_parser: TargetSelectorParser::new(),
             duration_parser: DurationParser::new(),
             aliases: ReasonAliasRegistry::new(),
+            ml_transport: None,
         }
     }
 
     pub fn with_reason_aliases(mut self, aliases: ReasonAliasRegistry) -> Self {
         self.aliases = aliases;
+        self
+    }
+
+    pub fn with_ml_server_transport(mut self, transport: MlServerTransport) -> Self {
+        self.ml_transport = Some(transport);
         self
     }
 
@@ -185,6 +193,20 @@ impl HostApi {
             dry_run: self.dry_run,
             value,
         }
+    }
+
+    fn ml_transport(
+        &self,
+        operation: HostApiOperation,
+    ) -> Result<&MlServerTransport, HostApiError> {
+        self.ml_transport.as_ref().ok_or_else(|| {
+            HostApiError::internal(
+                operation,
+                HostApiErrorDetail::ResourceUnavailable {
+                    resource: "ml_server_transport".to_owned(),
+                },
+            )
+        })
     }
 
     fn require_operation_capability(
