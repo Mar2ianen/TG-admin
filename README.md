@@ -3,6 +3,7 @@
 Текущий статус и архитектурные документы:
 
 - [docs/IMPLEMENTATION_SUMMARY.md](/home/arch/Документы/Teloxide/docs/IMPLEMENTATION_SUMMARY.md:1) — что реально собрано в коде сейчас
+- [docs/ML_SERVER_CONTRACT.md](/home/arch/Документы/Teloxide/docs/ML_SERVER_CONTRACT.md:1) — typed contract layer для интеграции с локальным `ml-server`
 - [docs/RUNTIME_CONTRACT.md](/home/arch/Документы/Teloxide/docs/RUNTIME_CONTRACT.md:1) — текущий runtime contract и что реально читает/использует startup path
 - [docs/MVP_ROADMAP.md](/home/arch/Документы/Teloxide/docs/MVP_ROADMAP.md:1) — путь к MVP после фиксации новой routing model
 - [docs/MVP_STATUS.md](/home/arch/Документы/Teloxide/docs/MVP_STATUS.md:1) — краткая сверка текущего кода против MVP-gate из roadmap

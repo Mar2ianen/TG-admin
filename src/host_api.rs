@@ -125,6 +125,18 @@ impl HostApi {
             HostApiRequest::UnitStatus(request) => self
                 .unit_status(event, request)
                 .map(|response| response.map(HostApiValue::UnitStatus)),
+            HostApiRequest::MlHealth(request) => self
+                .ml_health(event, request)
+                .map(|response| response.map(HostApiValue::MlHealth)),
+            HostApiRequest::MlEmbedText(request) => self
+                .ml_embed_text(event, request)
+                .map(|response| response.map(HostApiValue::MlEmbedText)),
+            HostApiRequest::MlChatCompletions(request) => self
+                .ml_chat_completions(event, request)
+                .map(|response| response.map(HostApiValue::MlChatCompletions)),
+            HostApiRequest::MlModels(request) => self
+                .ml_models(event, request)
+                .map(|response| response.map(HostApiValue::MlModels)),
         }
     }
 
@@ -549,7 +561,10 @@ impl HostApi {
                 HostApiOperation::AuditCompensate,
                 HostApiErrorDetail::InvalidField {
                     field: "action_id".to_owned(),
-                    message: format!("audit action `{}` has no compensation recipe", request.action_id),
+                    message: format!(
+                        "audit action `{}` has no compensation recipe",
+                        request.action_id
+                    ),
                 },
             )
         })?;
@@ -572,7 +587,10 @@ impl HostApi {
                 HostApiOperation::AuditCompensate,
                 HostApiErrorDetail::InvalidField {
                     field: "action_id".to_owned(),
-                    message: format!("audit action `{}` is already compensated", request.action_id),
+                    message: format!(
+                        "audit action `{}` is already compensated",
+                        request.action_id
+                    ),
                 },
             ));
         }
@@ -628,6 +646,99 @@ impl HostApi {
                 new_action_id: Some(new_action_id),
             },
         ))
+    }
+
+    pub fn ml_health(
+        &self,
+        event: &EventContext,
+        request: MlHealthRequest,
+    ) -> Result<HostApiResponse<MlHealthValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MlHealth)?;
+        self.require_operation_capability(event, HostApiOperation::MlHealth)?;
+        validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlHealth)?;
+
+        let value = MlHealthValue {
+            base_url: request.base_url,
+            transport_ready: false,
+        };
+        if self.dry_run {
+            return Ok(self.response(HostApiOperation::MlHealth, value));
+        }
+
+        Err(ml_runtime_unavailable(HostApiOperation::MlHealth))
+    }
+
+    pub fn ml_embed_text(
+        &self,
+        event: &EventContext,
+        request: MlEmbedTextRequest,
+    ) -> Result<HostApiResponse<MlEmbedTextValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MlEmbedText)?;
+        self.require_operation_capability(event, HostApiOperation::MlEmbedText)?;
+        validate_optional_base_url(
+            request.base_url.as_deref(),
+            HostApiOperation::MlEmbedText,
+        )?;
+        validate_ml_embed_request(&request)?;
+
+        let value = MlEmbedTextValue {
+            base_url: request.base_url,
+            model: request.model,
+            input_count: request.input.len(),
+            transport_ready: false,
+        };
+        if self.dry_run {
+            return Ok(self.response(HostApiOperation::MlEmbedText, value));
+        }
+
+        Err(ml_runtime_unavailable(HostApiOperation::MlEmbedText))
+    }
+
+    pub fn ml_chat_completions(
+        &self,
+        event: &EventContext,
+        request: MlChatCompletionsRequest,
+    ) -> Result<HostApiResponse<MlChatCompletionsValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MlChatCompletions)?;
+        self.require_operation_capability(event, HostApiOperation::MlChatCompletions)?;
+        validate_optional_base_url(
+            request.base_url.as_deref(),
+            HostApiOperation::MlChatCompletions,
+        )?;
+        validate_ml_chat_request(&request)?;
+
+        let value = MlChatCompletionsValue {
+            base_url: request.base_url,
+            model: request.model,
+            message_count: request.messages.len(),
+            max_tokens: request.max_tokens,
+            transport_ready: false,
+        };
+        if self.dry_run {
+            return Ok(self.response(HostApiOperation::MlChatCompletions, value));
+        }
+
+        Err(ml_runtime_unavailable(HostApiOperation::MlChatCompletions))
+    }
+
+    pub fn ml_models(
+        &self,
+        event: &EventContext,
+        request: MlModelsRequest,
+    ) -> Result<HostApiResponse<MlModelsValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MlModels)?;
+        self.require_operation_capability(event, HostApiOperation::MlModels)?;
+        validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlModels)?;
+
+        let value = MlModelsValue {
+            base_url: request.base_url,
+            transport_ready: false,
+        };
+        if self.dry_run {
+            return Ok(self.response(HostApiOperation::MlModels, value));
+        }
+
+        Err(ml_runtime_unavailable(HostApiOperation::MlModels))
     }
 
     fn storage(&self, operation: HostApiOperation) -> Result<&StorageConnection, HostApiError> {
@@ -747,6 +858,10 @@ fn required_capability(operation: HostApiOperation) -> Option<&'static str> {
         HostApiOperation::JobScheduleAfter => Some("job.schedule"),
         HostApiOperation::AuditFind => Some("audit.read"),
         HostApiOperation::AuditCompensate => Some("audit.compensate"),
+        HostApiOperation::MlHealth => Some("ml.health.read"),
+        HostApiOperation::MlEmbedText => Some("ml.embed_text"),
+        HostApiOperation::MlChatCompletions => Some("ml.chat"),
+        HostApiOperation::MlModels => Some("ml.models.read"),
         HostApiOperation::CtxCurrent
         | HostApiOperation::CtxResolveTarget
         | HostApiOperation::CtxParseDuration
@@ -758,6 +873,79 @@ fn required_capability(operation: HostApiOperation) -> Option<&'static str> {
         | HostApiOperation::DbKvSet
         | HostApiOperation::UnitStatus => None,
     }
+}
+
+fn validate_optional_base_url(
+    base_url: Option<&str>,
+    operation: HostApiOperation,
+) -> Result<(), HostApiError> {
+    if let Some(value) = base_url {
+        validate_non_empty(value, "base_url", operation)?;
+    }
+
+    Ok(())
+}
+
+fn validate_ml_embed_request(request: &MlEmbedTextRequest) -> Result<(), HostApiError> {
+    if request.input.is_empty() {
+        return Err(HostApiError::validation(
+            HostApiOperation::MlEmbedText,
+            HostApiErrorDetail::InvalidField {
+                field: "input".to_owned(),
+                message: "at least one input string is required".to_owned(),
+            },
+        ));
+    }
+
+    for value in &request.input {
+        validate_non_empty(value, "input", HostApiOperation::MlEmbedText)?;
+    }
+    if let Some(model) = request.model.as_deref() {
+        validate_non_empty(model, "model", HostApiOperation::MlEmbedText)?;
+    }
+
+    Ok(())
+}
+
+fn validate_ml_chat_request(request: &MlChatCompletionsRequest) -> Result<(), HostApiError> {
+    validate_non_empty(
+        &request.model,
+        "model",
+        HostApiOperation::MlChatCompletions,
+    )?;
+    if request.messages.is_empty() {
+        return Err(HostApiError::validation(
+            HostApiOperation::MlChatCompletions,
+            HostApiErrorDetail::InvalidField {
+                field: "messages".to_owned(),
+                message: "at least one chat message is required".to_owned(),
+            },
+        ));
+    }
+
+    for message in &request.messages {
+        validate_non_empty(
+            &message.role,
+            "messages.role",
+            HostApiOperation::MlChatCompletions,
+        )?;
+        validate_non_empty(
+            &message.content,
+            "messages.content",
+            HostApiOperation::MlChatCompletions,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn ml_runtime_unavailable(operation: HostApiOperation) -> HostApiError {
+    HostApiError::internal(
+        operation,
+        HostApiErrorDetail::ResourceUnavailable {
+            resource: "ml_server_transport".to_owned(),
+        },
+    )
 }
 
 fn validate_event(event: &EventContext, operation: HostApiOperation) -> Result<(), HostApiError> {
@@ -1176,6 +1364,10 @@ pub enum HostApiRequest {
     AuditFind(AuditFindRequest),
     AuditCompensate(AuditCompensateRequest),
     UnitStatus(UnitStatusRequest),
+    MlHealth(MlHealthRequest),
+    MlEmbedText(MlEmbedTextRequest),
+    MlChatCompletions(MlChatCompletionsRequest),
+    MlModels(MlModelsRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1195,6 +1387,10 @@ pub enum HostApiValue {
     AuditFind(AuditFindValue),
     AuditCompensate(AuditCompensateValue),
     UnitStatus(UnitStatusValue),
+    MlHealth(MlHealthValue),
+    MlEmbedText(MlEmbedTextValue),
+    MlChatCompletions(MlChatCompletionsValue),
+    MlModels(MlModelsValue),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -1215,6 +1411,10 @@ pub enum HostApiOperation {
     AuditFind,
     AuditCompensate,
     UnitStatus,
+    MlHealth,
+    MlEmbedText,
+    MlChatCompletions,
+    MlModels,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -1335,6 +1535,37 @@ pub struct UnitStatusRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlHealthRequest {
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlEmbedTextRequest {
+    pub base_url: Option<String>,
+    pub input: Vec<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlChatCompletionsRequest {
+    pub base_url: Option<String>,
+    pub model: String,
+    pub messages: Vec<MlChatMessage>,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlModelsRequest {
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DbUserGetValue {
     pub user: Option<UserRecord>,
 }
@@ -1390,6 +1621,35 @@ pub struct UnitStatusValue {
     pub requested_unit_id: Option<String>,
     pub summary: UnitRegistryStatus,
     pub unit: Option<UnitStatusEntry>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlHealthValue {
+    pub base_url: Option<String>,
+    pub transport_ready: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlEmbedTextValue {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub input_count: usize,
+    pub transport_ready: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlChatCompletionsValue {
+    pub base_url: Option<String>,
+    pub model: String,
+    pub message_count: usize,
+    pub max_tokens: Option<u32>,
+    pub transport_ready: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlModelsValue {
+    pub base_url: Option<String>,
+    pub transport_ready: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -1518,7 +1778,8 @@ mod tests {
         CtxResolveTargetRequest, DbKvGetRequest, DbKvSetRequest, DbUserGetRequest,
         DbUserIncrRequest, DbUserPatchRequest, HostApi, HostApiError, HostApiErrorDetail,
         HostApiErrorKind, HostApiOperation, HostApiRequest, HostApiValue, JobScheduleAfterRequest,
-        MsgByUserRequest, MsgWindowRequest, UnitStatusEntry, UnitStatusRequest,
+        MlChatCompletionsRequest, MlChatMessage, MlEmbedTextRequest, MlHealthRequest,
+        MlModelsRequest, MsgByUserRequest, MsgWindowRequest, UnitStatusEntry, UnitStatusRequest,
     };
     use crate::event::{
         ChatContext, EventContext, EventNormalizer, ExecutionMode, ManualInvocationInput,
@@ -3162,5 +3423,101 @@ mod tests {
             ),
             "unexpected error shape: {error:?}"
         );
+    }
+
+    #[test]
+    fn ml_embed_text_dry_run_returns_planned_contract_value() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["ml.embed_text"], &[], true);
+
+        let response = api
+            .ml_embed_text(
+                &event,
+                MlEmbedTextRequest {
+                    base_url: Some("http://localhost:11434".to_owned()),
+                    input: vec!["hello".to_owned(), "world".to_owned()],
+                    model: Some("sentence-transformers/all-MiniLM-L6-v2".to_owned()),
+                },
+            )
+            .expect("dry-run ml embed succeeds");
+
+        assert_eq!(response.operation, HostApiOperation::MlEmbedText);
+        assert!(response.dry_run);
+        assert_eq!(response.value.input_count, 2);
+        assert!(!response.value.transport_ready);
+    }
+
+    #[test]
+    fn ml_chat_completion_denies_without_capability() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["ml.embed_text"], &[], false);
+
+        let error = api
+            .ml_chat_completions(
+                &event,
+                MlChatCompletionsRequest {
+                    base_url: None,
+                    model: "meta-llama/llama-3.1-70b-instruct".to_owned(),
+                    messages: vec![MlChatMessage {
+                        role: "user".to_owned(),
+                        content: "Hi".to_owned(),
+                    }],
+                    max_tokens: Some(32),
+                },
+            )
+            .expect_err("missing capability must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Denied);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::CapabilityDenied {
+                capability: "ml.chat".to_owned(),
+                unit_id: "moderation.test".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn ml_health_returns_structured_unavailable_error_when_transport_is_not_wired() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["ml.health.read"], &[], false);
+
+        let error = api
+            .ml_health(
+                &event,
+                MlHealthRequest {
+                    base_url: Some("http://localhost:11434".to_owned()),
+                },
+            )
+            .expect_err("unwired ml transport must fail");
+
+        assert_eq!(error.kind, HostApiErrorKind::Internal);
+        assert_eq!(error.operation, HostApiOperation::MlHealth);
+        assert_eq!(
+            error.detail,
+            HostApiErrorDetail::ResourceUnavailable {
+                resource: "ml_server_transport".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn ml_models_request_routes_through_generic_host_api_call() {
+        let event = manual_event();
+        let (_dir, api) = storage_api_with_registry(&["ml.models.read"], &[], true);
+
+        let response = api
+            .call(
+                &event,
+                HostApiRequest::MlModels(MlModelsRequest { base_url: None }),
+            )
+            .expect("generic call succeeds");
+
+        assert_eq!(response.operation, HostApiOperation::MlModels);
+        assert!(response.dry_run);
+        match response.value {
+            HostApiValue::MlModels(value) => assert!(!value.transport_ready),
+            other => panic!("unexpected host api value: {other:?}"),
+        }
     }
 }

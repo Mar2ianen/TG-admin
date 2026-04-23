@@ -569,8 +569,11 @@ static VALID_CAPABILITIES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "ui.session.read",
         "ui.session.write",
         "sys.http.fetch",
+        "ml.health.read",
         "ml.stt",
         "ml.embed_text",
+        "ml.chat",
+        "ml.models.read",
         "unit.control",
     ])
 });

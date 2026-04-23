@@ -50,6 +50,14 @@
 - `RUST_LOG` тоже учитывается через `tracing_subscriber::EnvFilter`.
 - `observability.metrics_enabled` и `observability.trace_sampling` уже есть в конфиге, но текущий `init_logging()` их не использует.
 
+## ML Server Contract
+
+- В `HostApi` уже есть typed contract layer для `ml-server`: health, embeddings, chat completions и models list.
+- Это пока именно contract surface, а не подключенный runtime transport.
+- В `dry_run` эти операции возвращают planning metadata.
+- В обычном runtime path они пока завершаются structured `ResourceUnavailable` с ресурсом `ml_server_transport`.
+- Детали surface и capability names зафиксированы в [docs/ML_SERVER_CONTRACT.md](/home/arch/Документы/Teloxide/docs/ML_SERVER_CONTRACT.md:1).
+
 ## Local Run
 
 Локальный запуск из корня репозитория:
