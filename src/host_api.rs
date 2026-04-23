@@ -3,7 +3,7 @@ use std::rc::Rc;
 use crate::event::EventContext;
 use crate::parser::duration::{DurationParser, ParsedDuration};
 use crate::parser::reason::{ExpandedReason, ReasonAliasRegistry};
-use crate::parser::target::{ResolvedTarget, TargetSelectorParser, resolve_target};
+use crate::parser::target::TargetSelectorParser;
 use crate::storage::{AuditLogEntry, JobRecord, StorageConnection};
 use crate::unit::UnitRegistry;
 use chrono::Duration as ChronoDuration;
@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 mod contract;
+mod ctx;
 mod error;
 mod ml;
 mod validation;
@@ -152,70 +153,6 @@ impl HostApi {
                 .ml_models(event, request)
                 .map(|response| response.map(HostApiValue::MlModels)),
         }
-    }
-
-    pub fn ctx_current(
-        &self,
-        event: &EventContext,
-    ) -> Result<HostApiResponse<CtxCurrentValue>, HostApiError> {
-        validate_event(event, HostApiOperation::CtxCurrent)?;
-
-        Ok(self.response(
-            HostApiOperation::CtxCurrent,
-            CtxCurrentValue {
-                event: event.clone(),
-            },
-        ))
-    }
-
-    pub fn ctx_resolve_target(
-        &self,
-        event: &EventContext,
-        request: CtxResolveTargetRequest,
-    ) -> Result<HostApiResponse<ResolvedTarget>, HostApiError> {
-        validate_event(event, HostApiOperation::CtxResolveTarget)?;
-
-        let positional = request
-            .positional
-            .as_deref()
-            .map(|value| {
-                self.target_parser.parse(value).map_err(|source| {
-                    HostApiError::parse(
-                        HostApiOperation::CtxResolveTarget,
-                        HostApiErrorDetail::InvalidTarget {
-                            value: value.to_owned(),
-                            source,
-                        },
-                    )
-                })
-            })
-            .transpose()?;
-        let selector_flag = request
-            .selector_flag
-            .as_deref()
-            .map(|value| {
-                self.target_parser.parse(value).map_err(|source| {
-                    HostApiError::parse(
-                        HostApiOperation::CtxResolveTarget,
-                        HostApiErrorDetail::InvalidTarget {
-                            value: value.to_owned(),
-                            source,
-                        },
-                    )
-                })
-            })
-            .transpose()?;
-        let resolved = resolve_target(positional, selector_flag, event, |_| {
-            request.implicit.clone()
-        })
-        .ok_or_else(|| {
-            HostApiError::validation(
-                HostApiOperation::CtxResolveTarget,
-                HostApiErrorDetail::NoResolvableTarget,
-            )
-        })?;
-
-        Ok(self.response(HostApiOperation::CtxResolveTarget, resolved))
     }
 
     pub fn ctx_parse_duration(
