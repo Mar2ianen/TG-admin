@@ -1460,6 +1460,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_update_executes_live_mute_dry_run_without_side_effects() {
+        let (_dir, pipeline, inspect_storage, requests) =
+            moderation_pipeline_with_caps(&["tg.moderate.restrict"]);
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432708,
+                "message": {
+                    "chat": {
+                        "id": -100123,
+                        "title": "Moderation HQ",
+                        "type": "supergroup",
+                        "username": "mod_hq"
+                    },
+                    "date": 1721592688,
+                    "from": {
+                        "first_name": "Admin",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "admin"
+                    },
+                    "message_id": 905,
+                    "text": "/mute 30m spam -dry",
+                    "reply_to_message": {
+                        "message_id": 810,
+                        "chat": {
+                            "id": -100123,
+                            "title": "Moderation HQ",
+                            "type": "supergroup",
+                            "username": "mod_hq"
+                        },
+                        "date": 1721592580,
+                        "from": {
+                            "first_name": "Spammer",
+                            "id": 99,
+                            "is_bot": false,
+                            "username": "spam_user"
+                        },
+                        "text": "spam"
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let result = pipeline
+            .process_update(&update)
+            .await
+            .expect("ingress succeeds");
+
+        assert_eq!(result, IngressProcessResult::Processed);
+        assert!(requests.lock().expect("requests").is_empty());
+        let mute_entries = inspect_storage
+            .find_audit_entries(
+                &AuditLogFilter {
+                    op: Some("mute".to_owned()),
+                    target_id: Some("99".to_owned()),
+                    ..AuditLogFilter::default()
+                },
+                10,
+            )
+            .expect("audit lookup");
+        assert!(mute_entries.is_empty());
+        let processed = inspect_storage
+            .get_processed_update(439432708)
+            .expect("processed query")
+            .expect("processed record exists");
+        assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+    }
+
+    #[tokio::test]
     async fn process_update_executes_live_delete_window_via_built_in_moderation() {
         let (_dir, pipeline, inspect_storage, requests) =
             moderation_pipeline_with_caps(&["tg.moderate.delete"]);
