@@ -1,6 +1,6 @@
 use super::{
-    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, validate_event,
-    validate_non_empty, validate_optional_base_url,
+    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse,
+    validate_event, validate_non_empty,
 };
 use crate::event::EventContext;
 use serde::{Deserialize, Serialize};
@@ -79,7 +79,7 @@ impl HostApi {
             base_url: request.base_url,
             transport_ready: false,
         };
-        if self.dry_run {
+        if self.dry_run() {
             return Ok(self.response(HostApiOperation::MlHealth, value));
         }
 
@@ -105,7 +105,7 @@ impl HostApi {
             input_count: request.input.len(),
             transport_ready: false,
         };
-        if self.dry_run {
+        if self.dry_run() {
             return Ok(self.response(HostApiOperation::MlEmbedText, value));
         }
 
@@ -132,7 +132,7 @@ impl HostApi {
             max_tokens: request.max_tokens,
             transport_ready: false,
         };
-        if self.dry_run {
+        if self.dry_run() {
             return Ok(self.response(HostApiOperation::MlChatCompletions, value));
         }
 
@@ -152,12 +152,23 @@ impl HostApi {
             base_url: request.base_url,
             transport_ready: false,
         };
-        if self.dry_run {
+        if self.dry_run() {
             return Ok(self.response(HostApiOperation::MlModels, value));
         }
 
         Err(ml_runtime_unavailable(HostApiOperation::MlModels))
     }
+}
+
+fn validate_optional_base_url(
+    base_url: Option<&str>,
+    operation: HostApiOperation,
+) -> Result<(), HostApiError> {
+    if let Some(value) = base_url {
+        validate_non_empty(value, "base_url", operation)?;
+    }
+
+    Ok(())
 }
 
 fn validate_ml_embed_request(request: &MlEmbedTextRequest) -> Result<(), HostApiError> {
@@ -224,18 +235,14 @@ fn ml_runtime_unavailable(operation: HostApiOperation) -> HostApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        HostApi, HostApiErrorDetail, HostApiOperation, MlChatCompletionsRequest, MlChatMessage,
-        MlEmbedTextRequest, MlHealthRequest, MlModelsRequest,
-    };
+    use super::*;
     use crate::event::{
-        ChatContext, EventNormalizer, ManualInvocationInput, ReplyContext, UnitContext,
+        ChatContext, EventContext, EventNormalizer, ExecutionMode, ManualInvocationInput,
+        ReplyContext, SystemContext, SystemOrigin, UnitContext, UpdateType,
     };
-    use crate::host_api::{HostApiErrorKind, HostApiRequest, HostApiValue};
+    use crate::host_api::{HostApiRequest, HostApiValue};
     use crate::storage::Storage;
-    use crate::unit::{
-        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
-    };
+    use crate::unit::{CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry};
     use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
@@ -245,7 +252,7 @@ mod tests {
             .expect("valid timestamp")
     }
 
-    fn manual_event() -> crate::event::EventContext {
+    fn manual_event() -> EventContext {
         let normalizer = EventNormalizer::new();
         let mut input = ManualInvocationInput::new(
             UnitContext::new("moderation.test").with_trigger("manual"),
@@ -274,8 +281,8 @@ mod tests {
     }
 
     fn storage_api_with_registry(
-        capabilities: &[&str],
-        allow_missing: &[&str],
+        allow: &[&str],
+        deny: &[&str],
         dry_run: bool,
     ) -> (TempDir, HostApi) {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
@@ -283,19 +290,21 @@ mod tests {
         let storage = Storage::new(path)
             .init()
             .unwrap_or_else(|error| panic!("storage init failed: {error}"));
+
         let mut manifest = UnitManifest::new(
             UnitDefinition::new("moderation.test"),
             TriggerSpec::command(["warn"]),
             ServiceSpec::new("cargo run"),
         );
         manifest.capabilities = CapabilitiesSpec {
-            allow: capabilities.iter().map(|value| (*value).to_owned()).collect(),
-            deny: allow_missing.iter().map(|value| (*value).to_owned()).collect(),
+            allow: allow.iter().map(|value| (*value).to_owned()).collect(),
+            deny: deny.iter().map(|value| (*value).to_owned()).collect(),
         };
-        let report = UnitRegistry::load_manifests(vec![manifest]);
+        let registry = UnitRegistry::load_manifests(vec![manifest]).registry;
+
         let api = HostApi::new(dry_run)
             .with_storage(storage)
-            .with_unit_registry(report.registry);
+            .with_unit_registry(registry);
         (dir, api)
     }
 
@@ -341,7 +350,7 @@ mod tests {
             )
             .expect_err("missing capability must fail");
 
-        assert_eq!(error.kind, HostApiErrorKind::Denied);
+        assert_eq!(error.kind, super::super::HostApiErrorKind::Denied);
         assert_eq!(
             error.detail,
             HostApiErrorDetail::CapabilityDenied {
@@ -365,7 +374,7 @@ mod tests {
             )
             .expect_err("unwired ml transport must fail");
 
-        assert_eq!(error.kind, HostApiErrorKind::Internal);
+        assert_eq!(error.kind, super::super::HostApiErrorKind::Internal);
         assert_eq!(error.operation, HostApiOperation::MlHealth);
         assert_eq!(
             error.detail,
@@ -393,5 +402,24 @@ mod tests {
             HostApiValue::MlModels(value) => assert!(!value.transport_ready),
             other => panic!("unexpected host api value: {other:?}"),
         }
+    }
+
+    #[test]
+    fn invalid_event_maps_to_validation_error_for_ml_health() {
+        let mut event = EventContext::new(
+            "evt_invalid",
+            UpdateType::Message,
+            ExecutionMode::Realtime,
+            SystemContext::synthetic(SystemOrigin::Manual),
+        );
+        event.message = None;
+
+        let api = HostApi::new(false);
+        let error = api
+            .ml_health(&event, MlHealthRequest { base_url: None })
+            .expect_err("invalid event must fail");
+
+        assert_eq!(error.kind, super::super::HostApiErrorKind::Validation);
+        assert_eq!(error.operation, HostApiOperation::MlHealth);
     }
 }

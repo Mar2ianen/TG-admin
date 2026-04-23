@@ -789,17 +789,6 @@ fn required_capability(operation: HostApiOperation) -> Option<&'static str> {
     }
 }
 
-fn validate_optional_base_url(
-    base_url: Option<&str>,
-    operation: HostApiOperation,
-) -> Result<(), HostApiError> {
-    if let Some(value) = base_url {
-        validate_non_empty(value, "base_url", operation)?;
-    }
-
-    Ok(())
-}
-
 fn validate_event(event: &EventContext, operation: HostApiOperation) -> Result<(), HostApiError> {
     event.validate_invariants().map_err(|source| {
         HostApiError::validation(
