@@ -1316,6 +1316,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_update_executes_live_warn_via_built_in_moderation() {
+        let (_dir, pipeline, inspect_storage, requests) = moderation_pipeline_with_caps(&[]);
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432707,
+                "message": {
+                    "chat": {
+                        "id": -100123,
+                        "title": "Moderation HQ",
+                        "type": "supergroup",
+                        "username": "mod_hq"
+                    },
+                    "date": 1721592687,
+                    "from": {
+                        "first_name": "Admin",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "admin"
+                    },
+                    "message_id": 904,
+                    "text": "/warn 2.8",
+                    "reply_to_message": {
+                        "message_id": 810,
+                        "chat": {
+                            "id": -100123,
+                            "title": "Moderation HQ",
+                            "type": "supergroup",
+                            "username": "mod_hq"
+                        },
+                        "date": 1721592580,
+                        "from": {
+                            "first_name": "Spammer",
+                            "id": 99,
+                            "is_bot": false,
+                            "username": "spam_user"
+                        },
+                        "text": "spam"
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let result = pipeline
+            .process_update(&update)
+            .await
+            .expect("ingress succeeds");
+
+        assert_eq!(result, IngressProcessResult::Processed);
+        let requests = requests.lock().expect("requests");
+        assert!(requests.is_empty(), "warn should not emit telegram side effects");
+        drop(requests);
+
+        let user = inspect_storage
+            .get_user(99)
+            .expect("user lookup")
+            .expect("warn target exists");
+        assert_eq!(user.warn_count, 1);
+
+        let warn_entries = inspect_storage
+            .find_audit_entries(
+                &AuditLogFilter {
+                    op: Some("warn".to_owned()),
+                    target_id: Some("99".to_owned()),
+                    ..AuditLogFilter::default()
+                },
+                10,
+            )
+            .expect("audit lookup");
+        assert_eq!(warn_entries.len(), 1);
+
+        let processed = inspect_storage
+            .get_processed_update(439432707)
+            .expect("processed query")
+            .expect("processed record exists");
+        assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
+        assert_eq!(processed.execution_mode, "realtime");
+        assert!(processed.event_id.starts_with("evt_tg_"));
+    }
+
+    #[tokio::test]
     async fn process_update_executes_live_mute_via_built_in_moderation() {
         let (_dir, pipeline, inspect_storage, requests) =
             moderation_pipeline_with_caps(&["tg.moderate.restrict"]);
