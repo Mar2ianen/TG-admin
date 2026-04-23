@@ -1,6 +1,6 @@
 use super::{
-    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse,
-    validate_event, validate_non_empty,
+    validate_event, validate_non_empty, HostApi, HostApiError, HostApiErrorDetail,
+    HostApiOperation, HostApiResponse,
 };
 use crate::event::EventContext;
 use serde::{Deserialize, Serialize};
@@ -93,10 +93,7 @@ impl HostApi {
     ) -> Result<HostApiResponse<MlEmbedTextValue>, HostApiError> {
         validate_event(event, HostApiOperation::MlEmbedText)?;
         self.require_operation_capability(event, HostApiOperation::MlEmbedText)?;
-        validate_optional_base_url(
-            request.base_url.as_deref(),
-            HostApiOperation::MlEmbedText,
-        )?;
+        validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlEmbedText)?;
         validate_ml_embed_request(&request)?;
 
         let value = MlEmbedTextValue {
@@ -193,11 +190,7 @@ fn validate_ml_embed_request(request: &MlEmbedTextRequest) -> Result<(), HostApi
 }
 
 fn validate_ml_chat_request(request: &MlChatCompletionsRequest) -> Result<(), HostApiError> {
-    validate_non_empty(
-        &request.model,
-        "model",
-        HostApiOperation::MlChatCompletions,
-    )?;
+    validate_non_empty(&request.model, "model", HostApiOperation::MlChatCompletions)?;
     if request.messages.is_empty() {
         return Err(HostApiError::validation(
             HostApiOperation::MlChatCompletions,
@@ -242,7 +235,9 @@ mod tests {
     };
     use crate::host_api::{HostApiRequest, HostApiValue};
     use crate::storage::Storage;
-    use crate::unit::{CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry};
+    use crate::unit::{
+        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
+    };
     use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
