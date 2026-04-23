@@ -37,6 +37,9 @@ pub(crate) use validation::{
     validate_non_empty, validate_user_id, validate_user_incr_request, validate_user_patch,
 };
 
+#[cfg(test)]
+mod test_support;
+
 #[derive(Debug, Clone)]
 pub struct HostApi {
     dry_run: bool,
