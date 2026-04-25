@@ -3,25 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct TargetSelectorParser;
-
-impl Default for TargetSelectorParser {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TargetSelectorParser {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn parse(&self, input: &str) -> Result<ParsedTargetSelector, TargetParseError> {
-        parse_target_selector(input)
-    }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedTarget {
     pub selector: ParsedTargetSelector,
@@ -198,8 +179,8 @@ pub fn resolve_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedTargetSelector, ResolvedTarget, TargetParseError, TargetSelectorParser, TargetSource,
-        resolve_target,
+        ParsedTargetSelector, ResolvedTarget, TargetParseError, TargetSource,
+        parse_target_selector, resolve_target,
     };
     use crate::event::{
         EventContext, ExecutionMode, MessageContentKind, MessageContext, ReplyContext,
@@ -213,9 +194,8 @@ mod tests {
         let usernames = vec!["user", "User123", "user_123", "a", "test_user_123"];
         for username in usernames {
             let input = format!("@{}", username);
-            let parsed = TargetSelectorParser::new()
-                .parse(&input)
-                .unwrap_or_else(|_| panic!("{} should parse", input));
+            let parsed =
+                parse_target_selector(&input).unwrap_or_else(|_| panic!("{} should parse", input));
             match parsed {
                 ParsedTargetSelector::Username { username: u } => {
                     assert_eq!(u, username);
@@ -230,9 +210,8 @@ mod tests {
         let ids = vec![1, 42, 1000, 999999, -100, -42];
         for id in ids {
             let input = id.to_string();
-            let parsed = TargetSelectorParser::new()
-                .parse(&input)
-                .unwrap_or_else(|_| panic!("{} should parse", input));
+            let parsed =
+                parse_target_selector(&input).unwrap_or_else(|_| panic!("{} should parse", input));
             match parsed {
                 ParsedTargetSelector::UserId { user_id } => {
                     assert_eq!(user_id, id);
@@ -247,9 +226,8 @@ mod tests {
         let ids = vec![-100, -42, -1];
         for id in ids {
             let input = id.to_string();
-            let parsed = TargetSelectorParser::new()
-                .parse(&input)
-                .unwrap_or_else(|_| panic!("{} should parse", input));
+            let parsed =
+                parse_target_selector(&input).unwrap_or_else(|_| panic!("{} should parse", input));
             let is_user_id = matches!(parsed, ParsedTargetSelector::UserId { .. });
             assert!(is_user_id);
         }
@@ -285,26 +263,22 @@ mod tests {
 
     #[test]
     fn parses_supported_target_selector_forms() {
-        let parser = TargetSelectorParser::new();
-
         assert_eq!(
-            parser.parse("@spam_user").expect("username parses"),
+            parse_target_selector("@spam_user").expect("username parses"),
             ParsedTargetSelector::Username {
                 username: "spam_user".to_owned(),
             }
         );
         assert_eq!(
-            parser.parse("12345").expect("id parses"),
+            parse_target_selector("12345").expect("id parses"),
             ParsedTargetSelector::UserId { user_id: 12345 }
         );
         assert_eq!(
-            parser.parse("msg:42").expect("anchor parses"),
+            parse_target_selector("msg:42").expect("anchor parses"),
             ParsedTargetSelector::MessageAnchor { message_id: 42 }
         );
         assert_eq!(
-            parser
-                .parse(r#"{"kind":"user","id":42}"#)
-                .expect("json parses"),
+            parse_target_selector(r#"{"kind":"user","id":42}"#).expect("json parses"),
             ParsedTargetSelector::JsonSelector {
                 raw: json!({"kind": "user", "id": 42}),
             }
@@ -313,9 +287,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_target_selector() {
-        let parser = TargetSelectorParser::new();
-
-        let err = parser.parse("@bad-name").expect_err("invalid username");
+        let err = parse_target_selector("@bad-name").expect_err("invalid username");
         assert_eq!(
             err,
             TargetParseError::InvalidUsername("@bad-name".to_owned())
@@ -324,27 +296,21 @@ mod tests {
 
     #[test]
     fn accepts_only_bounded_json_selector_shapes() {
-        let parser = TargetSelectorParser::new();
-
         assert_eq!(
-            parser
-                .parse(r#"{"id":42}"#)
-                .expect("id-only json selector parses"),
+            parse_target_selector(r#"{"id":42}"#).expect("id-only json selector parses"),
             ParsedTargetSelector::JsonSelector {
                 raw: json!({"id": 42}),
             }
         );
         assert_eq!(
-            parser
-                .parse(r#"{"username":"spam_user"}"#)
+            parse_target_selector(r#"{"username":"spam_user"}"#)
                 .expect("username-only json selector parses"),
             ParsedTargetSelector::JsonSelector {
                 raw: json!({"username": "spam_user"}),
             }
         );
         assert_eq!(
-            parser
-                .parse(r#"{"kind":"user","id":42,"username":"spam_user"}"#)
+            parse_target_selector(r#"{"kind":"user","id":42,"username":"spam_user"}"#)
                 .expect("full json selector parses"),
             ParsedTargetSelector::JsonSelector {
                 raw: json!({"kind": "user", "id": 42, "username": "spam_user"}),
@@ -354,7 +320,6 @@ mod tests {
 
     #[test]
     fn rejects_loose_or_invalid_json_selectors() {
-        let parser = TargetSelectorParser::new();
         let invalid_inputs = vec![
             r#"{}"#,
             r#"[]"#,
@@ -368,9 +333,7 @@ mod tests {
         ];
 
         for input in invalid_inputs {
-            let err = parser
-                .parse(input)
-                .expect_err("selector should be rejected");
+            let err = parse_target_selector(input).expect_err("selector should be rejected");
             assert_eq!(err, TargetParseError::InvalidSelector(input.to_owned()));
         }
     }

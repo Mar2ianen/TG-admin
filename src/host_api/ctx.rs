@@ -3,9 +3,9 @@ use super::{
     HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, validate_event,
 };
 use crate::event::EventContext;
-use crate::parser::duration::ParsedDuration;
+use crate::parser::duration::{ParsedDuration, parse_duration};
 use crate::parser::reason::ExpandedReason;
-use crate::parser::target::{ResolvedTarget, resolve_target};
+use crate::parser::target::{ResolvedTarget, parse_target_selector, resolve_target};
 
 impl HostApi {
     pub fn ctx_current(
@@ -33,7 +33,7 @@ impl HostApi {
             .positional
             .as_deref()
             .map(|value| {
-                self.target_parser.parse(value).map_err(|source| {
+                parse_target_selector(value).map_err(|source| {
                     HostApiError::parse(
                         HostApiOperation::CtxResolveTarget,
                         HostApiErrorDetail::InvalidTarget {
@@ -48,7 +48,7 @@ impl HostApi {
             .selector_flag
             .as_deref()
             .map(|value| {
-                self.target_parser.parse(value).map_err(|source| {
+                parse_target_selector(value).map_err(|source| {
                     HostApiError::parse(
                         HostApiOperation::CtxResolveTarget,
                         HostApiErrorDetail::InvalidTarget {
@@ -79,18 +79,15 @@ impl HostApi {
     ) -> Result<HostApiResponse<ParsedDuration>, HostApiError> {
         validate_event(event, HostApiOperation::CtxParseDuration)?;
 
-        let parsed = self
-            .duration_parser
-            .parse(request.input.trim())
-            .map_err(|source| {
-                HostApiError::parse(
-                    HostApiOperation::CtxParseDuration,
-                    HostApiErrorDetail::InvalidDuration {
-                        value: request.input,
-                        source,
-                    },
-                )
-            })?;
+        let parsed = parse_duration(request.input.trim()).map_err(|source| {
+            HostApiError::parse(
+                HostApiOperation::CtxParseDuration,
+                HostApiErrorDetail::InvalidDuration {
+                    value: request.input,
+                    source,
+                },
+            )
+        })?;
 
         Ok(self.response(HostApiOperation::CtxParseDuration, parsed))
     }

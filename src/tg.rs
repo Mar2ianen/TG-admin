@@ -877,6 +877,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
 
     match request {
         TelegramRequest::SendUi(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.template.trim().is_empty() {
                 return Err(validation_error(
                     operation,
@@ -886,6 +887,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::SendMessage(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.text.trim().is_empty() {
                 return Err(validation_error(
                     operation,
@@ -895,6 +897,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::EditUi(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.template.trim().is_empty() {
                 return Err(validation_error(
                     operation,
@@ -911,6 +914,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::Delete(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.message_id <= 0 {
                 return Err(validation_error(
                     operation,
@@ -920,6 +924,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::DeleteMany(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.message_ids.is_empty() {
                 return Err(validation_error(
                     operation,
@@ -940,6 +945,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::Restrict(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.user_id <= 0 {
                 return Err(validation_error(
                     operation,
@@ -949,6 +955,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::Unrestrict(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.user_id <= 0 {
                 return Err(validation_error(
                     operation,
@@ -958,6 +965,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::Ban(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.user_id <= 0 {
                 return Err(validation_error(
                     operation,
@@ -967,6 +975,7 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
             }
         }
         TelegramRequest::Unban(request) => {
+            validate_chat_id(operation, request.chat_id)?;
             if request.user_id <= 0 {
                 return Err(validation_error(
                     operation,
@@ -984,6 +993,18 @@ fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> {
                 ));
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_chat_id(operation: TelegramOperation, chat_id: ChatId) -> Result<(), TelegramError> {
+    if chat_id == 0 {
+        return Err(validation_error(
+            operation,
+            "chat_id",
+            "chat_id must not be zero",
+        ));
     }
 
     Ok(())
@@ -1507,5 +1528,66 @@ mod tests {
 
         assert_eq!(error.kind, TelegramErrorKind::Validation);
         assert_eq!(error.operation, TelegramOperation::SendMessage);
+    }
+
+    #[tokio::test]
+    async fn execute_checked_dry_run_rejects_zero_chat_id() {
+        let gateway = TelegramGateway::default();
+
+        let error = gateway
+            .execute_checked(
+                TelegramRequest::SendMessage(super::TelegramSendMessageRequest {
+                    chat_id: 0,
+                    text: "hello".to_owned(),
+                    reply_to_message_id: None,
+                    silent: false,
+                    parse_mode: ParseMode::PlainText,
+                    markup: None,
+                }),
+                TelegramExecutionOptions { dry_run: true },
+            )
+            .await
+            .expect_err("zero chat id must fail before prediction");
+
+        assert_eq!(error.kind, TelegramErrorKind::Validation);
+        assert_eq!(error.operation, TelegramOperation::SendMessage);
+        assert_eq!(
+            error.details,
+            Some(json!({
+                "field": "chat_id",
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_checked_live_rejects_zero_chat_id_before_transport() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gateway = TelegramGateway::default().with_transport(StaticTransport {
+            result: TelegramResult::Message(TelegramMessageResult {
+                chat_id: -100,
+                message_id: 1,
+                raw_passthrough: false,
+            }),
+            calls: Arc::clone(&calls),
+        });
+
+        let error = gateway
+            .execute_checked(
+                TelegramRequest::SendMessage(super::TelegramSendMessageRequest {
+                    chat_id: 0,
+                    text: "hello".to_owned(),
+                    reply_to_message_id: None,
+                    silent: false,
+                    parse_mode: ParseMode::PlainText,
+                    markup: None,
+                }),
+                TelegramExecutionOptions::default(),
+            )
+            .await
+            .expect_err("zero chat id must fail before transport");
+
+        assert_eq!(error.kind, TelegramErrorKind::Validation);
+        assert_eq!(error.operation, TelegramOperation::SendMessage);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

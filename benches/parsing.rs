@@ -4,38 +4,37 @@ use telegram_moderation_os::event::{
     ChatContext, EventNormalizer, ExecutionMode, MessageContentKind, MessageContext, SenderContext,
     SystemContext, UpdateType,
 };
-use telegram_moderation_os::parser::command::CommandParser;
+use telegram_moderation_os::parser::command::parse_command_line;
 use telegram_moderation_os::parser::dispatch::EventCommandDispatcher;
-use telegram_moderation_os::parser::duration::DurationParser;
-use telegram_moderation_os::parser::target::TargetSelectorParser;
+use telegram_moderation_os::parser::duration::parse_duration;
+use telegram_moderation_os::parser::target::parse_target_selector;
 use telegram_moderation_os::unit::UnitManifest;
 
 fn bench_duration_parse(c: &mut Criterion) {
     c.bench_function("duration_parse/7d", |b| {
-        b.iter(|| DurationParser::new().parse(black_box("7d")));
+        b.iter(|| parse_duration(black_box("7d")));
     });
 }
 
 fn bench_target_parse(c: &mut Criterion) {
     c.bench_function("target_parse/username", |b| {
-        b.iter(|| TargetSelectorParser::new().parse(black_box("@username")));
+        b.iter(|| parse_target_selector(black_box("@username")));
     });
 
     c.bench_function("target_parse/user_id", |b| {
-        b.iter(|| TargetSelectorParser::new().parse(black_box("12345")));
+        b.iter(|| parse_target_selector(black_box("12345")));
     });
 }
 
 fn bench_command_parse(c: &mut Criterion) {
     let event = dummy_event();
-    let parser = CommandParser::new();
 
     c.bench_function("command_parse/warn", |b| {
-        b.iter(|| parser.parse(black_box("/warn @user 2.8"), &event));
+        b.iter(|| parse_command_line(black_box("/warn @user 2.8"), &event));
     });
 
     c.bench_function("command_parse/mute", |b| {
-        b.iter(|| parser.parse(black_box("/mute @user 7d spam"), &event));
+        b.iter(|| parse_command_line(black_box("/mute @user 7d spam"), &event));
     });
 }
 

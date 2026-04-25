@@ -2639,7 +2639,6 @@ dependencies = [
  "libsqlite3-sys",
  "moka",
  "notify",
- "once_cell",
  "parking_lot",
  "pretty_assertions",
  "proptest",

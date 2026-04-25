@@ -1,11 +1,10 @@
 use crate::event::{CommandSource, EventContext};
-use crate::parser::command::{CommandParseError, CommandParser, ParsedCommandLine};
+use crate::parser::command::{CommandParseError, ParsedCommandLine, parse_command_line};
 use crate::parser::reason::{ExpandedCommandLine, ReasonAliasRegistry};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct EventCommandDispatcher {
-    parser: CommandParser,
     aliases: ReasonAliasRegistry,
 }
 
@@ -18,16 +17,12 @@ impl Default for EventCommandDispatcher {
 impl EventCommandDispatcher {
     pub fn new() -> Self {
         Self {
-            parser: CommandParser::new(),
             aliases: ReasonAliasRegistry::new(),
         }
     }
 
     pub fn with_aliases(aliases: ReasonAliasRegistry) -> Self {
-        Self {
-            parser: CommandParser::new(),
-            aliases,
-        }
+        Self { aliases }
     }
 
     pub fn dispatch(&self, event: &EventContext) -> CommandDispatchResult {
@@ -60,7 +55,7 @@ impl EventCommandDispatcher {
             });
         }
 
-        match self.parser.parse(raw_source, event) {
+        match parse_command_line(raw_source, event) {
             Ok(parsed) => CommandDispatchResult::Parsed(Box::new(DispatchedCommand {
                 source_kind,
                 raw_source: raw_source.to_owned(),

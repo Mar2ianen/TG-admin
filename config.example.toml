@@ -22,14 +22,11 @@ log_dir = "data/logs"
 sqlite_journal_mode = "WAL"
 sqlite_synchronous = "NORMAL"
 sqlite_busy_timeout_ms = 3000
-max_write_batch_size = 256
-write_flush_interval_ms = 5000
 
 [runtime]
 tokio_worker_threads = 4
 shutdown_grace_period_ms = 10000
 
-# Present in config, but current startup path does not change runtime behavior from them.
 reload_enabled = true
 manual_mode_enabled = false
 

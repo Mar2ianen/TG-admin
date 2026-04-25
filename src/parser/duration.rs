@@ -3,25 +3,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct DurationParser;
-
-impl Default for DurationParser {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DurationParser {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn parse(&self, input: &str) -> Result<ParsedDuration, DurationParseError> {
-        parse_duration(input)
-    }
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ParsedDuration {
     pub value: u64,
@@ -88,7 +69,7 @@ pub enum DurationParseError {
     InvalidValue(String),
 }
 
-fn parse_duration(input: &str) -> Result<ParsedDuration, DurationParseError> {
+pub fn parse_duration(input: &str) -> Result<ParsedDuration, DurationParseError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(DurationParseError::EmptyInput);
@@ -117,7 +98,7 @@ fn parse_duration(input: &str) -> Result<ParsedDuration, DurationParseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DurationParseError, DurationParser, DurationUnit, ParsedDuration};
+    use super::{DurationParseError, DurationUnit, ParsedDuration, parse_duration};
 
     #[test]
     fn duration_seconds_multiplier_always_positive() {
@@ -142,16 +123,14 @@ mod tests {
     fn duration_roundtrips_valid_input() {
         let inputs = vec!["1s", "5m", "2h", "7d", "3w", "100s", "99m"];
         for input in inputs {
-            let parsed = DurationParser::new().parse(input);
+            let parsed = parse_duration(input);
             assert!(parsed.is_ok(), "input {} should parse", input);
         }
     }
 
     #[test]
     fn parses_supported_duration_units() {
-        let parser = DurationParser::new();
-
-        let parsed = parser.parse("7d").expect("duration parses");
+        let parsed = parse_duration("7d").expect("duration parses");
         assert_eq!(parsed.value, 7);
         assert_eq!(parsed.unit, DurationUnit::Days);
         assert_eq!(parsed.into_std().as_secs(), 7 * 24 * 60 * 60);
@@ -159,25 +138,19 @@ mod tests {
 
     #[test]
     fn rejects_duration_without_unit() {
-        let parser = DurationParser::new();
-
-        let err = parser.parse("30").expect_err("suffix required");
+        let err = parse_duration("30").expect_err("suffix required");
         assert_eq!(err, DurationParseError::MissingUnit);
     }
 
     #[test]
     fn rejects_invalid_duration_value() {
-        let parser = DurationParser::new();
-
-        let err = parser.parse("xh").expect_err("numeric value required");
+        let err = parse_duration("xh").expect_err("numeric value required");
         assert_eq!(err, DurationParseError::InvalidValue("x".to_owned()));
     }
 
     #[test]
     fn rejects_invalid_duration_unit() {
-        let parser = DurationParser::new();
-
-        let err = parser.parse("7y").expect_err("unsupported unit must fail");
+        let err = parse_duration("7y").expect_err("unsupported unit must fail");
         assert_eq!(err, DurationParseError::InvalidUnit('y'));
     }
 }

@@ -4,7 +4,7 @@ use telegram_moderation_os::event::{
     ChatContext, EventNormalizer, ExecutionMode, MessageContentKind, MessageContext, SenderContext,
     SystemContext, UpdateType,
 };
-use telegram_moderation_os::parser::command::CommandParser;
+use telegram_moderation_os::parser::command::parse_command_line;
 use telegram_moderation_os::parser::dispatch::EventCommandDispatcher;
 use telegram_moderation_os::parser::reason::{ReasonAliasDefinition, ReasonAliasRegistry};
 use telegram_moderation_os::unit::UnitManifest;
@@ -39,11 +39,7 @@ fn snapshots_dir() -> std::path::PathBuf {
 #[test]
 fn command_warn_snapshot_matches_golden() {
     let event = realtime_event();
-    let parser = CommandParser::new();
-
-    let parsed = parser
-        .parse("/warn @spam_user 2.8", &event)
-        .expect("should parse");
+    let parsed = parse_command_line("/warn @spam_user 2.8", &event).expect("should parse");
 
     let actual_value: serde_json::Value =
         serde_json::from_str(&serde_json::to_string_pretty(&parsed).expect("should serialize"))
@@ -60,11 +56,8 @@ fn command_warn_snapshot_matches_golden() {
 #[test]
 fn command_mute_with_flags_snapshot() {
     let event = realtime_event();
-    let parser = CommandParser::new();
-
-    let parsed = parser
-        .parse("/mute @bad_user 7d spam -s -dry", &event)
-        .expect("should parse");
+    let parsed =
+        parse_command_line("/mute @bad_user 7d spam -s -dry", &event).expect("should parse");
 
     let actual = serde_json::to_string_pretty(&parsed).expect("should serialize");
 

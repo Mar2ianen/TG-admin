@@ -818,6 +818,38 @@ impl StorageConnection {
         Ok(())
     }
 
+    pub fn poll_due_jobs(&self, now: &str, limit: usize) -> Result<Vec<JobRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, executor_unit, run_at, scheduled_at, status, dedupe_key,
+                    payload_json, retry_count, max_retries, last_error_code,
+                    last_error_text, audit_action_id, created_at, updated_at
+             FROM jobs
+             WHERE status = 'scheduled' AND run_at <= ?1
+             ORDER BY run_at ASC
+             LIMIT ?2",
+        )?;
+
+        statement
+            .query_map(params![now, limit as i64], map_job_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StorageError::from)
+    }
+
+    pub fn update_job_status(
+        &self,
+        job_id: &str,
+        status: &str,
+        error_text: Option<&str>,
+        now: &str,
+    ) -> Result<(), StorageError> {
+        self.connection.execute(
+            "UPDATE jobs SET status = ?2, last_error_text = ?3, updated_at = ?4
+             WHERE job_id = ?1",
+            params![job_id, status, error_text, now],
+        )?;
+        Ok(())
+    }
+
     pub fn get_audit_entry(&self, action_id: &str) -> Result<Option<AuditLogEntry>, StorageError> {
         let mut statement = self.connection.prepare(
             "SELECT action_id, trace_id, request_id, unit_name, execution_mode, op,

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::event::{EventContext, ExecutionMode};
+use crate::event::{EventContext, ExecutionMode, UnitContext};
 use crate::parser::command::{CommandAst, DeleteCommand, MessageCommand, ParsedCommandLine};
 use crate::parser::dispatch::{
     CommandDispatchParseError, CommandDispatchResult, CommandDispatchSkip, EventCommandDispatcher,
@@ -94,6 +94,14 @@ impl ModerationEngine {
         &self,
         event: &EventContext,
     ) -> Result<ModerationEventResult, ModerationError> {
+        self.handle_event_with_unit_policy(event, None).await
+    }
+
+    pub async fn handle_event_with_unit_policy(
+        &self,
+        event: &EventContext,
+        unit_policy: Option<&ModerationUnitPolicy>,
+    ) -> Result<ModerationEventResult, ModerationError> {
         event
             .validate_invariants()
             .map_err(|source| ModerationError::InvalidEvent(source.to_string()))?;
@@ -111,7 +119,12 @@ impl ModerationEngine {
             CommandDispatchResult::ParseError(error) => ModerationEventResult::ParseError(error),
             CommandDispatchResult::Parsed(dispatched) => {
                 let execution = self
-                    .execute_command_line(event, &dispatched.parsed, &dispatched.expanded)
+                    .execute_command_line(
+                        event,
+                        &dispatched.parsed,
+                        &dispatched.expanded,
+                        unit_policy,
+                    )
                     .await?;
                 ModerationEventResult::Executed(execution)
             }
@@ -170,6 +183,7 @@ impl ModerationEngine {
         event: &EventContext,
         parsed: &ParsedCommandLine,
         expanded: &ExpandedCommandLine,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
         self.require_admin(event)?;
         let effective_dry_run = self.dry_run || command_dry_run(&parsed.command);
@@ -177,32 +191,39 @@ impl ModerationEngine {
             (&expanded.command, &expanded.pipe),
             (ExpandedCommandAst::Mute(_), Some(_))
         ) {
-            self.require_capability(event, "job.schedule")?;
+            self.require_capability(event, unit_policy, "job.schedule")?;
         }
         let mut execution = match &expanded.command {
             ExpandedCommandAst::Warn(command) => {
-                self.execute_warn(event, command, effective_dry_run).await?
-            }
-            ExpandedCommandAst::Mute(command) => {
-                self.execute_mute(event, command, effective_dry_run).await?
-            }
-            ExpandedCommandAst::Ban(command) => {
-                self.execute_ban(event, command, effective_dry_run).await?
-            }
-            ExpandedCommandAst::Del(command) => {
-                self.execute_delete(event, command, effective_dry_run)
+                self.execute_warn(event, command, effective_dry_run, unit_policy)
                     .await?
             }
-            ExpandedCommandAst::Undo(_) => self.execute_undo(event, effective_dry_run).await?,
+            ExpandedCommandAst::Mute(command) => {
+                self.execute_mute(event, command, effective_dry_run, unit_policy)
+                    .await?
+            }
+            ExpandedCommandAst::Ban(command) => {
+                self.execute_ban(event, command, effective_dry_run, unit_policy)
+                    .await?
+            }
+            ExpandedCommandAst::Del(command) => {
+                self.execute_delete(event, command, effective_dry_run, unit_policy)
+                    .await?
+            }
+            ExpandedCommandAst::Undo(_) => {
+                self.execute_undo(event, effective_dry_run, unit_policy)
+                    .await?
+            }
             ExpandedCommandAst::Msg(command) => {
-                self.execute_message(event, command, effective_dry_run)
+                self.execute_message(event, command, effective_dry_run, unit_policy)
                     .await?
             }
         };
 
         if let (ExpandedCommandAst::Mute(command), Some(pipe)) = (&expanded.command, &expanded.pipe)
         {
-            let scheduled_job = self.schedule_pipe(event, command, pipe, effective_dry_run)?;
+            let scheduled_job =
+                self.schedule_pipe(event, command, pipe, effective_dry_run, unit_policy)?;
             execution.jobs.push(scheduled_job);
         }
 
@@ -214,6 +235,7 @@ impl ModerationEngine {
         event: &EventContext,
         command: &ExpandedModerationCommand,
         dry_run: bool,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
         let target = describe_target(event, &command.command.target)?;
         let now = event.received_at.to_rfc3339();
@@ -246,7 +268,7 @@ impl ModerationEngine {
 
         let mut execution = ModerationExecution::new(dry_run);
         if command.command.flags.public_notice {
-            self.require_capability(event, "tg.write_message")?;
+            self.require_capability(event, unit_policy, "tg.write_message")?;
             let message = self
                 .gateway
                 .execute_checked(
@@ -271,6 +293,7 @@ impl ModerationEngine {
 
         let audit = self.build_audit_entry(
             event,
+            unit_policy,
             AuditEntrySpec {
                 op: "warn",
                 target: &target,
@@ -304,8 +327,9 @@ impl ModerationEngine {
         event: &EventContext,
         command: &ExpandedMuteCommand,
         dry_run: bool,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
-        self.require_capability(event, "tg.moderate.restrict")?;
+        self.require_capability(event, unit_policy, "tg.moderate.restrict")?;
         let target = describe_target(event, &command.command.target)?;
         let user_id = require_user_id(&target, "mute")?;
         let chat_id = require_chat_id(event)?;
@@ -330,7 +354,7 @@ impl ModerationEngine {
         execution.telegram.push(telegram.clone());
 
         if command.command.flags.public_notice {
-            self.require_capability(event, "tg.write_message")?;
+            self.require_capability(event, unit_policy, "tg.write_message")?;
             let notice = self
                 .gateway
                 .execute_checked(
@@ -355,6 +379,7 @@ impl ModerationEngine {
 
         let audit = self.build_audit_entry(
             event,
+            unit_policy,
             AuditEntrySpec {
                 op: "mute",
                 target: &target,
@@ -391,8 +416,9 @@ impl ModerationEngine {
         event: &EventContext,
         command: &ExpandedModerationCommand,
         dry_run: bool,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
-        self.require_capability(event, "tg.moderate.ban")?;
+        self.require_capability(event, unit_policy, "tg.moderate.ban")?;
         let target = describe_target(event, &command.command.target)?;
         let user_id = require_user_id(&target, "ban")?;
         let chat_id = require_chat_id(event)?;
@@ -418,6 +444,7 @@ impl ModerationEngine {
         execution.telegram.push(telegram.clone());
         let audit = self.build_audit_entry(
             event,
+            unit_policy,
             AuditEntrySpec {
                 op: "ban",
                 target: &target,
@@ -452,8 +479,9 @@ impl ModerationEngine {
         event: &EventContext,
         command: &DeleteCommand,
         dry_run: bool,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
-        self.require_capability(event, "tg.moderate.delete")?;
+        self.require_capability(event, unit_policy, "tg.moderate.delete")?;
         let chat_id = require_chat_id(event)?;
         let (anchor_message_id, implicit_user_id) = delete_anchor(event, &command.target)?;
         let mut messages = self
@@ -523,6 +551,7 @@ impl ModerationEngine {
         let target = ExecutionTarget::message_anchor(anchor_message_id);
         let audit = self.build_audit_entry(
             event,
+            unit_policy,
             AuditEntrySpec {
                 op: "del",
                 target: &target,
@@ -555,8 +584,9 @@ impl ModerationEngine {
         &self,
         event: &EventContext,
         dry_run: bool,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
-        self.require_capability(event, "audit.compensate")?;
+        self.require_capability(event, unit_policy, "audit.compensate")?;
         let chat_id = require_chat_id(event)?;
         let reference_message_id = undo_reference_message_id(event)?;
         let original = self
@@ -612,6 +642,7 @@ impl ModerationEngine {
 
         let audit = self.build_audit_entry(
             event,
+            unit_policy,
             AuditEntrySpec {
                 op: "undo",
                 target: &target,
@@ -645,8 +676,9 @@ impl ModerationEngine {
         event: &EventContext,
         command: &MessageCommand,
         dry_run: bool,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
-        self.require_capability(event, "tg.write_message")?;
+        self.require_capability(event, unit_policy, "tg.write_message")?;
         let telegram = self
             .gateway
             .execute_checked(
@@ -676,8 +708,9 @@ impl ModerationEngine {
         command: &ExpandedMuteCommand,
         pipe: &ExpandedCommandLine,
         dry_run: bool,
+        unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<JobRecord, ModerationError> {
-        self.require_capability(event, "job.schedule")?;
+        self.require_capability(event, unit_policy, "job.schedule")?;
         let ExpandedCommandAst::Msg(message) = &pipe.command else {
             return Err(ModerationError::UnsupportedCommand(
                 "only /msg pipe is supported in phase 6".to_owned(),
@@ -721,12 +754,12 @@ impl ModerationEngine {
     fn require_capability(
         &self,
         event: &EventContext,
+        unit_policy: Option<&ModerationUnitPolicy>,
         capability: &'static str,
     ) -> Result<(), ModerationError> {
-        let unit = event
-            .system
-            .unit
-            .as_ref()
+        let unit = unit_policy
+            .map(|policy| &policy.unit)
+            .or(event.system.unit.as_ref())
             .ok_or_else(|| ModerationError::CapabilityDenied {
                 capability: capability.to_owned(),
                 unit_id: "runtime".to_owned(),
@@ -791,17 +824,21 @@ impl ModerationEngine {
         })
     }
 
-    fn build_audit_entry(&self, event: &EventContext, spec: AuditEntrySpec<'_>) -> AuditLogEntry {
+    fn build_audit_entry(
+        &self,
+        event: &EventContext,
+        unit_policy: Option<&ModerationUnitPolicy>,
+        spec: AuditEntrySpec<'_>,
+    ) -> AuditLogEntry {
+        let unit_name = unit_policy
+            .map(|policy| policy.unit.id.clone())
+            .or_else(|| event.system.unit.as_ref().map(|unit| unit.id.clone()))
+            .unwrap_or_else(|| "runtime".to_owned());
         AuditLogEntry {
             action_id: format!("act_{}", Uuid::new_v4().simple()),
             trace_id: event.system.trace_id.clone(),
             request_id: Some(event.event_id.clone()),
-            unit_name: event
-                .system
-                .unit
-                .as_ref()
-                .map(|unit| unit.id.clone())
-                .unwrap_or_else(|| "runtime".to_owned()),
+            unit_name,
             execution_mode: execution_mode_name(event.execution_mode).to_owned(),
             op: spec.op.to_owned(),
             actor_user_id: event.sender.as_ref().map(|sender| sender.id),
@@ -818,6 +855,17 @@ impl ModerationEngine {
             result_json: spec.result_json.map(|value| value.to_string()),
             created_at: event.received_at.to_rfc3339(),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModerationUnitPolicy {
+    pub unit: UnitContext,
+}
+
+impl ModerationUnitPolicy {
+    pub fn new(unit: UnitContext) -> Self {
+        Self { unit }
     }
 }
 
@@ -979,7 +1027,7 @@ async fn execute_compensation(
             user_id,
             reason,
         } => {
-            engine.require_capability(event, "tg.moderate.restrict")?;
+            engine.require_capability(event, None, "tg.moderate.restrict")?;
             let telegram = engine
                 .gateway
                 .execute_checked(
@@ -1008,7 +1056,7 @@ async fn execute_compensation(
             user_id,
             reason,
         } => {
-            engine.require_capability(event, "tg.moderate.ban")?;
+            engine.require_capability(event, None, "tg.moderate.ban")?;
             let telegram = engine
                 .gateway
                 .execute_checked(
@@ -1206,7 +1254,7 @@ fn moderation_reason(reason: Option<&ExpandedReason>) -> Option<crate::tg::Moder
 
 fn reason_value(reason: Option<&ExpandedReason>) -> Value {
     reason
-        .map(|value| serde_json::to_value(value).expect("expanded reason serializes"))
+        .and_then(|value| serde_json::to_value(value).ok())
         .unwrap_or(Value::Null)
 }
 
@@ -1281,7 +1329,7 @@ fn hash_text(input: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModerationEngine, ModerationError, ModerationEventResult};
+    use super::{ModerationEngine, ModerationError, ModerationEventResult, ModerationUnitPolicy};
     use crate::event::{
         ChatContext, EventNormalizer, ManualInvocationInput, MessageContext, ReplyContext,
         SenderContext, TelegramUpdateInput, UnitContext,
@@ -1877,6 +1925,24 @@ mod tests {
             } if capability == "tg.moderate.restrict" && unit_id == "moderation.test"
         ));
         assert!(requests.lock().expect("requests").is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_unit_policy_keeps_capability_checks_and_audit_scoped() {
+        let (_dir, _requests, engine) = engine_with_caps(&["tg.moderate.restrict"]);
+        let event = reply_event("/mute 30m spam", 99, 810);
+        let policy =
+            ModerationUnitPolicy::new(UnitContext::new("moderation.test").with_trigger("telegram"));
+
+        let result = engine
+            .handle_event_with_unit_policy(&event, Some(&policy))
+            .await
+            .expect("mute succeeds with explicit policy");
+
+        let ModerationEventResult::Executed(execution) = result else {
+            panic!("expected executed result");
+        };
+        assert_eq!(execution.audit_entries[0].unit_name, "moderation.test");
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ use telegram_moderation_os::observability::init_logging;
 use telegram_moderation_os::{AppConfig, Application};
 use tracing::info;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let config = AppConfig::load()?;
     init_logging(&config)?;

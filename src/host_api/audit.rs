@@ -12,6 +12,7 @@ use super::{
     JobScheduleAfterValue, execution_mode_label, storage_error, to_rfc3339,
 };
 use crate::event::EventContext;
+use crate::parser::duration::parse_duration;
 use crate::storage::{AuditLogEntry, JobRecord};
 
 impl HostApi {
@@ -24,18 +25,15 @@ impl HostApi {
         self.require_operation_capability(event, HostApiOperation::JobScheduleAfter)?;
         validate_job_schedule_request(&request, HostApiOperation::JobScheduleAfter)?;
 
-        let parsed_delay = self
-            .duration_parser
-            .parse(request.delay.trim())
-            .map_err(|source| {
-                HostApiError::parse(
-                    HostApiOperation::JobScheduleAfter,
-                    HostApiErrorDetail::InvalidDuration {
-                        value: request.delay.clone(),
-                        source,
-                    },
-                )
-            })?;
+        let parsed_delay = parse_duration(request.delay.trim()).map_err(|source| {
+            HostApiError::parse(
+                HostApiOperation::JobScheduleAfter,
+                HostApiErrorDetail::InvalidDuration {
+                    value: request.delay.clone(),
+                    source,
+                },
+            )
+        })?;
         let delay = duration_to_chrono(parsed_delay, HostApiOperation::JobScheduleAfter)?;
         if delay > ChronoDuration::days(MAX_JOB_DELAY_DAYS) {
             return Err(HostApiError::validation(

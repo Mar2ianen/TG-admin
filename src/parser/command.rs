@@ -1,34 +1,11 @@
 use crate::event::{EventContext, ExecutionMode};
-use crate::parser::duration::{DurationParseError, DurationParser, ParsedDuration};
+use crate::parser::duration::{DurationParseError, ParsedDuration, parse_duration};
 use crate::parser::target::{
     ParsedTargetSelector, ResolvedTarget, TargetParseError, parse_target_selector, resolve_target,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct CommandParser;
-
-impl Default for CommandParser {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl CommandParser {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn parse(
-        &self,
-        input: &str,
-        event: &EventContext,
-    ) -> Result<ParsedCommandLine, CommandParseError> {
-        parse_command_line(input, event)
-    }
-}
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ParsedCommandLine {
@@ -194,7 +171,7 @@ struct CommandTokens {
     flags: IndexMap<String, Token>,
 }
 
-fn parse_command_line(
+pub fn parse_command_line(
     input: &str,
     event: &EventContext,
 ) -> Result<ParsedCommandLine, CommandParseError> {
@@ -310,12 +287,12 @@ fn parse_mute_command(
         .first()
         .cloned()
         .ok_or_else(|| CommandParseError::MissingDuration("mute".to_owned()))?;
-    let duration = DurationParser::new()
-        .parse(&duration_token.text)
-        .map_err(|source| CommandParseError::InvalidDuration {
+    let duration = parse_duration(&duration_token.text).map_err(|source| {
+        CommandParseError::InvalidDuration {
             value: duration_token.text.clone(),
             source,
-        })?;
+        }
+    })?;
     tokens.arguments.remove(0);
     let reason = parse_reason_tokens(&tokens.arguments);
 
@@ -443,11 +420,9 @@ fn take_duration_flag(
 ) -> Result<Option<ParsedDuration>, CommandParseError> {
     take_token_flag(tokens, name)?
         .map(|token| {
-            DurationParser::new().parse(&token.text).map_err(|source| {
-                CommandParseError::InvalidDuration {
-                    value: token.text,
-                    source,
-                }
+            parse_duration(&token.text).map_err(|source| CommandParseError::InvalidDuration {
+                value: token.text,
+                source,
             })
         })
         .transpose()
@@ -706,10 +681,7 @@ fn lex_segment(segment: &str) -> Result<Vec<Token>, CommandParseError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CommandAst, CommandParseError, CommandParser, DeleteWindow, ReasonExpr,
-        command_name_from_ast,
-    };
+    use super::{CommandAst, CommandParseError, DeleteWindow, ReasonExpr, command_name_from_ast};
     use crate::event::{
         EventContext, ExecutionMode, MessageContentKind, MessageContext, ReplyContext,
         SystemContext, UpdateType,
@@ -770,12 +742,10 @@ mod tests {
 
     #[test]
     fn parses_warn_with_rule_code_reason() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let parsed = parser
-            .parse("/warn @spam_user 2.8", &event)
-            .expect("warn parses");
+        let parsed =
+            super::parse_command_line("/warn @spam_user 2.8", &event).expect("warn parses");
 
         match parsed.command {
             CommandAst::Warn(warn) => {
@@ -795,12 +765,11 @@ mod tests {
 
     #[test]
     fn parses_mute_with_duration_flags_and_pipe() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let parsed = parser
-            .parse(r#"/mute @spam_user 7d 2.8 -s | /msg "время вышло""#, &event)
-            .expect("mute parses");
+        let parsed =
+            super::parse_command_line(r#"/mute @spam_user 7d 2.8 -s | /msg "время вышло""#, &event)
+                .expect("mute parses");
 
         match parsed.command {
             CommandAst::Mute(mute) => {
@@ -820,12 +789,10 @@ mod tests {
 
     #[test]
     fn parses_delete_window_with_implicit_anchor() {
-        let parser = CommandParser::new();
         let event = event_without_reply();
 
-        let parsed = parser
-            .parse("/del -up 2 -dn 2", &event)
-            .expect("delete window parses");
+        let parsed =
+            super::parse_command_line("/del -up 2 -dn 2", &event).expect("delete window parses");
 
         match parsed.command {
             CommandAst::Del(del) => {
@@ -842,21 +809,19 @@ mod tests {
 
     #[test]
     fn parses_undo_command() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let parsed = parser.parse("/undo", &event).expect("undo parses");
+        let parsed = super::parse_command_line("/undo", &event).expect("undo parses");
         assert!(matches!(parsed.command, CommandAst::Undo(_)));
     }
 
     #[test]
     fn parses_quoted_reason_with_spaces() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let parsed = parser
-            .parse(r#"/warn @spam_user "очень плохое поведение""#, &event)
-            .expect("quoted reason parses");
+        let parsed =
+            super::parse_command_line(r#"/warn @spam_user "очень плохое поведение""#, &event)
+                .expect("quoted reason parses");
 
         match parsed.command {
             CommandAst::Warn(warn) => assert_eq!(
@@ -869,11 +834,9 @@ mod tests {
 
     #[test]
     fn prefers_explicit_target_over_flag_and_reply_context() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let parsed = parser
-            .parse("/warn @explicit -user 42 2.8", &event)
+        let parsed = super::parse_command_line("/warn @explicit -user 42 2.8", &event)
             .expect("target precedence parses");
 
         match parsed.command {
@@ -892,12 +855,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_flag_target_then_reply_target() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let parsed = parser
-            .parse("/warn -user 42 2.8", &event)
-            .expect("selector flag parses");
+        let parsed =
+            super::parse_command_line("/warn -user 42 2.8", &event).expect("selector flag parses");
         match parsed.command {
             CommandAst::Warn(warn) => {
                 assert_eq!(warn.target.source, TargetSource::SelectorFlag);
@@ -909,9 +870,8 @@ mod tests {
             other => panic!("unexpected AST: {other:?}"),
         }
 
-        let reply_only = parser
-            .parse("/warn 2.8", &event)
-            .expect("reply fallback parses");
+        let reply_only =
+            super::parse_command_line("/warn 2.8", &event).expect("reply fallback parses");
         match reply_only.command {
             CommandAst::Warn(warn) => assert_eq!(warn.target.source, TargetSource::ReplyContext),
             other => panic!("unexpected AST: {other:?}"),
@@ -920,11 +880,9 @@ mod tests {
 
     #[test]
     fn supports_json_target_selector_via_flag() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let parsed = parser
-            .parse(r#"/del -user {"kind":"user","id":42}"#, &event)
+        let parsed = super::parse_command_line(r#"/del -user {"kind":"user","id":42}"#, &event)
             .expect("json selector parses");
 
         match parsed.command {
@@ -943,22 +901,18 @@ mod tests {
 
     #[test]
     fn rejects_invalid_command() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let err = parser
-            .parse("/explode @user", &event)
+        let err = super::parse_command_line("/explode @user", &event)
             .expect_err("unknown command must fail");
         assert_eq!(err, CommandParseError::UnknownCommand("explode".to_owned()));
     }
 
     #[test]
     fn rejects_conflicting_flags() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let err = parser
-            .parse("/mute @user 7d 2.8 -s -pub", &event)
+        let err = super::parse_command_line("/mute @user 7d 2.8 -s -pub", &event)
             .expect_err("conflict must fail");
         assert_eq!(
             err,
@@ -971,22 +925,17 @@ mod tests {
 
     #[test]
     fn rejects_missing_target_when_context_cannot_supply_it() {
-        let parser = CommandParser::new();
         let event = event_without_reply();
 
-        let err = parser
-            .parse("/warn 2.8", &event)
-            .expect_err("target is required");
+        let err = super::parse_command_line("/warn 2.8", &event).expect_err("target is required");
         assert_eq!(err, CommandParseError::MissingTarget("warn".to_owned()));
     }
 
     #[test]
     fn rejects_invalid_duration_with_precise_error() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let err = parser
-            .parse("/mute @user 30 2.8", &event)
+        let err = super::parse_command_line("/mute @user 30 2.8", &event)
             .expect_err("duration unit is required");
         assert_eq!(
             err,
@@ -999,22 +948,18 @@ mod tests {
 
     #[test]
     fn rejects_nested_pipe() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let err = parser
-            .parse("/mute @user 7d | /msg done | /undo", &event)
+        let err = super::parse_command_line("/mute @user 7d | /msg done | /undo", &event)
             .expect_err("nested pipe must fail");
         assert_eq!(err, CommandParseError::NestedPipeNotSupported);
     }
 
     #[test]
     fn rejects_pipe_for_command_without_scheduling_semantics() {
-        let parser = CommandParser::new();
         let event = realtime_event();
 
-        let err = parser
-            .parse("/warn @user 2.8 | /msg done", &event)
+        let err = super::parse_command_line("/warn @user 2.8 | /msg done", &event)
             .expect_err("warn pipe is invalid");
         assert_eq!(err, CommandParseError::PipeNotAllowed("warn".to_owned()));
     }

@@ -4,9 +4,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -549,7 +549,7 @@ const fn default_restart_sec() -> u64 {
     1
 }
 
-static VALID_CAPABILITIES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+static VALID_CAPABILITIES: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
         "tg.read_basic",
         "tg.write_message",

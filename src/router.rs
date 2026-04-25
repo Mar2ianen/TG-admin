@@ -6,89 +6,76 @@ use crate::event::{
     AuthorSourceClass, ChatRouteClass, CommandSource, EventContext, ExecutionMode,
     MessageContentKind, UnitContext, UpdateType,
 };
-use crate::moderation::{ModerationEngine, ModerationError, ModerationEventResult};
+use crate::moderation::{
+    ModerationEngine, ModerationError, ModerationEventResult, ModerationUnitPolicy,
+};
 use crate::unit::{TriggerSpec, UnitEventType, UnitRegistry, UnitStatus};
 use regex::Regex;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct EventClassifier;
+pub fn classify_event(event: &EventContext) -> ClassifiedEvent {
+    let mut traits = Vec::new();
+    push_unique(&mut traits, event_trait_for_update_type(event.update_type));
 
-impl Default for EventClassifier {
-    fn default() -> Self {
-        Self::new()
+    if event
+        .message
+        .as_ref()
+        .and_then(|message| message.text.as_deref())
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        push_unique(&mut traits, EventTrait::Text);
     }
-}
-
-impl EventClassifier {
-    pub fn new() -> Self {
-        Self
+    if event.reply.is_some() {
+        push_unique(&mut traits, EventTrait::Reply);
     }
-
-    pub fn classify(&self, event: &EventContext) -> ClassifiedEvent {
-        let mut traits = Vec::new();
-        push_unique(&mut traits, event_trait_for_update_type(event.update_type));
-
-        if event
-            .message
-            .as_ref()
-            .and_then(|message| message.text.as_deref())
-            .is_some_and(|text| !text.trim().is_empty())
-        {
-            push_unique(&mut traits, EventTrait::Text);
-        }
-        if event.reply.is_some() {
-            push_unique(&mut traits, EventTrait::Reply);
-        }
-        if event
-            .message
-            .as_ref()
-            .is_some_and(|message| message.has_media)
-        {
+    if event
+        .message
+        .as_ref()
+        .is_some_and(|message| message.has_media)
+    {
+        push_unique(&mut traits, EventTrait::Media);
+    }
+    if let Some(content_kind) = event
+        .message
+        .as_ref()
+        .and_then(|message| message.content_kind)
+    {
+        push_unique(&mut traits, event_trait_for_content_kind(content_kind));
+        if !matches!(content_kind, MessageContentKind::Text) {
             push_unique(&mut traits, EventTrait::Media);
         }
-        if let Some(content_kind) = event
-            .message
-            .as_ref()
-            .and_then(|message| message.content_kind)
-        {
-            push_unique(&mut traits, event_trait_for_content_kind(content_kind));
-            if !matches!(content_kind, MessageContentKind::Text) {
-                push_unique(&mut traits, EventTrait::Media);
-            }
-        }
-        if event
-            .message
-            .as_ref()
-            .and_then(|message| message.media_group_id.as_deref())
-            .is_some()
-        {
-            push_unique(&mut traits, EventTrait::MediaGroup);
-        }
-        if event
-            .callback
-            .as_ref()
-            .and_then(|callback| callback.data.as_deref())
-            .is_some()
-        {
-            push_unique(&mut traits, EventTrait::CallbackData);
-        }
-        if event.is_linked_channel_style_approx() {
-            push_unique(&mut traits, EventTrait::LinkedChannelStyle);
-        }
+    }
+    if event
+        .message
+        .as_ref()
+        .and_then(|message| message.media_group_id.as_deref())
+        .is_some()
+    {
+        push_unique(&mut traits, EventTrait::MediaGroup);
+    }
+    if event
+        .callback
+        .as_ref()
+        .and_then(|callback| callback.data.as_deref())
+        .is_some()
+    {
+        push_unique(&mut traits, EventTrait::CallbackData);
+    }
+    if event.is_linked_channel_style_approx() {
+        push_unique(&mut traits, EventTrait::LinkedChannelStyle);
+    }
 
-        let command_name = extract_command_name(event);
-        if command_name.is_some() {
-            push_unique(&mut traits, EventTrait::Command);
-        }
+    let command_name = extract_command_name(event);
+    if command_name.is_some() {
+        push_unique(&mut traits, EventTrait::Command);
+    }
 
-        ClassifiedEvent {
-            ingress_class: ingress_class_for(event.execution_mode),
-            chat_scope: chat_scope_for(event),
-            author_kind: author_kind_for(event),
-            update_type: event.update_type,
-            traits,
-            command_name,
-        }
+    ClassifiedEvent {
+        ingress_class: ingress_class_for(event.execution_mode),
+        chat_scope: chat_scope_for(event),
+        author_kind: author_kind_for(event),
+        update_type: event.update_type,
+        traits,
+        command_name,
     }
 }
 
@@ -356,7 +343,6 @@ impl Default for RouterIndex {
 
 #[derive(Debug, Clone)]
 pub struct ExecutionRouter {
-    classifier: EventClassifier,
     index: Rc<RefCell<RouterIndex>>,
     moderation: Option<ModerationEngine>,
     registry: Rc<RefCell<UnitRegistry>>,
@@ -365,7 +351,6 @@ pub struct ExecutionRouter {
 impl ExecutionRouter {
     pub fn new() -> Self {
         Self {
-            classifier: EventClassifier::new(),
             index: Rc::new(RefCell::new(RouterIndex::default())),
             moderation: None,
             registry: Rc::new(RefCell::new(UnitRegistry::default())),
@@ -388,7 +373,7 @@ impl ExecutionRouter {
     }
 
     pub fn plan(&self, event: &EventContext) -> RoutePlan {
-        self.index.borrow().plan(self.classifier.classify(event))
+        self.index.borrow().plan(classify_event(event))
     }
 
     pub fn index_stats(&self) -> RouterIndexStats {
@@ -409,19 +394,20 @@ impl ExecutionRouter {
         };
 
         if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
-            let deferred_lanes = deferred_lanes(&plan, ExecutionLane::BuiltInModeration);
             let moderation = self
                 .moderation
                 .as_ref()
                 .ok_or(RoutingError::MissingLaneExecutor {
                     lane: ExecutionLane::BuiltInModeration,
                 })?;
-            let built_in_event = bind_manifest_unit_for_built_in(event, &unit_invocations);
-            let result = moderation.handle_event(&built_in_event).await?;
+            let unit_policy = unit_policy_for_builtin_moderation(&unit_invocations);
+            let result = moderation
+                .handle_event_with_unit_policy(event, unit_policy.as_ref())
+                .await?;
             return Ok(ExecutionOutcome::BuiltInModeration {
                 plan,
                 result,
-                deferred_lanes,
+                deferred_invocations: unit_invocations,
             });
         }
 
@@ -472,7 +458,7 @@ pub enum ExecutionOutcome {
     BuiltInModeration {
         plan: RoutePlan,
         result: ModerationEventResult,
-        deferred_lanes: Vec<ExecutionLane>,
+        deferred_invocations: Vec<UnitDispatchInvocation>,
     },
     UnitDispatch {
         plan: RoutePlan,
@@ -626,34 +612,23 @@ where
     }
 }
 
-fn deferred_lanes(plan: &RoutePlan, executed_lane: ExecutionLane) -> Vec<ExecutionLane> {
-    plan.lanes
-        .iter()
-        .copied()
-        .filter(|lane| *lane != executed_lane)
-        .collect()
-}
-
-fn bind_manifest_unit_for_built_in(
-    event: &EventContext,
-    invocations: &[UnitDispatchInvocation],
-) -> EventContext {
-    let Some(invocation) = invocations.first() else {
-        return event.clone();
-    };
-
-    event.clone().bind_unit(
-        UnitContext::new(invocation.unit_id.clone())
-            .with_trigger(unit_trigger_name(&invocation.trigger)),
-    )
-}
-
 fn unit_trigger_name(trigger: &UnitDispatchTrigger) -> &'static str {
     match trigger {
         UnitDispatchTrigger::Command { .. }
         | UnitDispatchTrigger::Regex { .. }
         | UnitDispatchTrigger::EventType { .. } => "telegram",
     }
+}
+
+fn unit_policy_for_builtin_moderation(
+    invocations: &[UnitDispatchInvocation],
+) -> Option<ModerationUnitPolicy> {
+    invocations.first().map(|invocation| {
+        ModerationUnitPolicy::new(
+            UnitContext::new(invocation.unit_id.clone())
+                .with_trigger(unit_trigger_name(&invocation.trigger)),
+        )
+    })
 }
 
 fn select_unit_dispatches(
@@ -738,9 +713,9 @@ fn unit_event_type_for(update_type: UpdateType) -> Option<UnitEventType> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthorKind, ChatScope, EventClassifier, EventTrait, ExecutionLane, ExecutionOutcome,
-        ExecutionRouter, IngressClass, RouteBucket, RouterIndex, RoutingError,
-        UnitDispatchInvocation, UnitDispatchTrigger,
+        AuthorKind, ChatScope, EventTrait, ExecutionLane, ExecutionOutcome, ExecutionRouter,
+        IngressClass, RouteBucket, RouterIndex, RoutingError, UnitDispatchInvocation,
+        UnitDispatchTrigger, classify_event,
     };
     use crate::event::{
         CallbackContext, ChatContext, EventContext, EventNormalizer, ExecutionMode,
@@ -948,7 +923,6 @@ mod tests {
 
     #[test]
     fn classifier_marks_manual_command_reply_traits() {
-        let classifier = EventClassifier::new();
         let mut event = manual_event("/warn @spam spam");
         event.reply = Some(crate::event::ReplyContext {
             message_id: 900,
@@ -959,7 +933,7 @@ mod tests {
         });
         event.message = event.message.map(|message| message.with_reply(Some(900)));
 
-        let classified = classifier.classify(&event);
+        let classified = classify_event(&event);
 
         assert_eq!(classified.ingress_class, IngressClass::Manual);
         assert_eq!(classified.command_name.as_deref(), Some("warn"));
@@ -971,8 +945,7 @@ mod tests {
 
     #[test]
     fn classifier_marks_scheduled_job_and_command() {
-        let classifier = EventClassifier::new();
-        let classified = classifier.classify(&scheduled_event("/mute @spam 1h"));
+        let classified = classify_event(&scheduled_event("/mute @spam 1h"));
 
         assert_eq!(classified.ingress_class, IngressClass::Scheduled);
         assert_eq!(classified.command_name.as_deref(), Some("mute"));
@@ -983,8 +956,7 @@ mod tests {
 
     #[test]
     fn classifier_marks_callback_command_bucket() {
-        let classifier = EventClassifier::new();
-        let classified = classifier.classify(&callback_event("/undo"));
+        let classified = classify_event(&callback_event("/undo"));
 
         assert_eq!(classified.ingress_class, IngressClass::Realtime);
         assert_eq!(classified.command_name.as_deref(), Some("undo"));
@@ -995,8 +967,7 @@ mod tests {
 
     #[test]
     fn classifier_marks_private_chat_scope_and_human_admin_author() {
-        let classifier = EventClassifier::new();
-        let classified = classifier.classify(&private_text_event("hello"));
+        let classified = classify_event(&private_text_event("hello"));
 
         assert_eq!(classified.chat_scope, ChatScope::Private);
         assert_eq!(classified.author_kind, AuthorKind::HumanAdmin);
@@ -1006,8 +977,7 @@ mod tests {
 
     #[test]
     fn classifier_marks_linked_channel_style_approximation() {
-        let classifier = EventClassifier::new();
-        let classified = classifier.classify(&linked_channel_style_group_event());
+        let classified = classify_event(&linked_channel_style_group_event());
 
         assert_eq!(classified.chat_scope, ChatScope::Supergroup);
         assert_eq!(classified.author_kind, AuthorKind::ChannelIdentity);
@@ -1017,7 +987,6 @@ mod tests {
 
     #[test]
     fn classifier_marks_voice_bucket_when_content_kind_is_voice() {
-        let classifier = EventClassifier::new();
         let mut event = realtime_text_event("");
         event.message = Some(MessageContext {
             id: 704,
@@ -1031,7 +1000,7 @@ mod tests {
             media_group_id: None,
         });
 
-        let classified = classifier.classify(&event);
+        let classified = classify_event(&event);
 
         assert!(classified.traits.contains(&EventTrait::Voice));
         assert!(classified.traits.contains(&EventTrait::Media));
@@ -1064,8 +1033,6 @@ mod tests {
                 true,
             ),
         ];
-        let classifier = EventClassifier::new();
-
         for (content_kind, expected_trait, expects_media_trait) in cases {
             let mut event = realtime_text_event("");
             event.message = Some(MessageContext {
@@ -1080,7 +1047,7 @@ mod tests {
                 media_group_id: None,
             });
 
-            let classified = classifier.classify(&event);
+            let classified = classify_event(&event);
 
             assert!(
                 classified.traits.contains(&expected_trait),
@@ -1149,7 +1116,7 @@ mod tests {
         assert!(stats.command_routes >= 7);
         assert!(stats.trait_routes >= 2);
 
-        let command_plan = index.plan(EventClassifier::new().classify(&manual_event("/stats")));
+        let command_plan = index.plan(classify_event(&manual_event("/stats")));
         assert!(command_plan.lanes.contains(&ExecutionLane::UnitDispatch));
         assert!(
             command_plan
@@ -1157,7 +1124,7 @@ mod tests {
                 .contains(&RouteBucket::CommandIndex("stats".to_owned()))
         );
 
-        let callback_plan = index.plan(EventClassifier::new().classify(&callback_event("resolve")));
+        let callback_plan = index.plan(classify_event(&callback_event("resolve")));
         assert!(
             callback_plan
                 .matched_buckets
@@ -1178,8 +1145,8 @@ mod tests {
             TriggerSpec::command(["audit"]),
             ServiceSpec::new("scripts/command/audit.rhai"),
         );
-        let router = ExecutionRouter::new()
-            .with_registry(registry_from_manifests(vec![stats_manifest]));
+        let router =
+            ExecutionRouter::new().with_registry(registry_from_manifests(vec![stats_manifest]));
 
         assert!(
             router
@@ -1228,7 +1195,7 @@ mod tests {
         let ExecutionOutcome::BuiltInModeration {
             plan,
             result,
-            deferred_lanes,
+            deferred_invocations,
         } = outcome
         else {
             panic!("expected built-in moderation outcome");
@@ -1237,7 +1204,7 @@ mod tests {
             plan.matched_buckets
                 .contains(&RouteBucket::CommandIndex("warn".to_owned()))
         );
-        assert!(deferred_lanes.is_empty());
+        assert!(deferred_invocations.is_empty());
         assert!(matches!(result, ModerationEventResult::Executed(_)));
     }
 
@@ -1249,8 +1216,7 @@ mod tests {
             ServiceSpec::new("scripts/moderation/warn_shadow.rhai"),
         );
         let registry = registry_from_manifests(vec![unit_manifest]);
-        let router = router_with_moderation()
-            .with_registry(registry.clone());
+        let router = router_with_moderation().with_registry(registry.clone());
         let mut event = manual_event("/warn @spam spam");
         event.reply = Some(crate::event::ReplyContext {
             message_id: 900,
@@ -1266,7 +1232,7 @@ mod tests {
         let ExecutionOutcome::BuiltInModeration {
             plan,
             result,
-            deferred_lanes,
+            deferred_invocations,
         } = outcome
         else {
             panic!("expected built-in moderation outcome");
@@ -1278,12 +1244,22 @@ mod tests {
                 ExecutionLane::UnitDispatch,
             ]
         );
-        assert_eq!(deferred_lanes, vec![ExecutionLane::UnitDispatch]);
+        assert_eq!(
+            deferred_invocations,
+            vec![UnitDispatchInvocation {
+                unit_id: "moderation.warn.shadow".to_owned(),
+                exec_start: "scripts/moderation/warn_shadow.rhai".to_owned(),
+                entry_point: None,
+                trigger: UnitDispatchTrigger::Command {
+                    command: "warn".to_owned(),
+                },
+            }]
+        );
         assert!(matches!(result, ModerationEventResult::Executed(_)));
     }
 
     #[tokio::test]
-    async fn router_binds_manifest_unit_context_before_built_in_moderation() {
+    async fn router_passes_explicit_unit_policy_to_built_in_moderation() {
         let mut unit_manifest = UnitManifest::new(
             UnitDefinition::new("moderation.mute.shadow"),
             TriggerSpec::command(["mute"]),
@@ -1317,18 +1293,59 @@ mod tests {
         });
         event.message = event.message.map(|message| message.with_reply(Some(900)));
 
+        let expected_unit_id = event.system.unit.as_ref().map(|unit| unit.id.clone());
+        let expected_unit_trigger = event
+            .system
+            .unit
+            .as_ref()
+            .and_then(|unit| unit.trigger.clone());
         let outcome = router.route(&event).await.expect("routing succeeds");
 
         let ExecutionOutcome::BuiltInModeration {
+            plan,
             result,
-            deferred_lanes,
-            ..
+            deferred_invocations,
         } = outcome
         else {
             panic!("expected built-in moderation outcome");
         };
-        assert_eq!(deferred_lanes, vec![ExecutionLane::UnitDispatch]);
-        assert!(matches!(result, ModerationEventResult::Executed(_)));
+        assert_eq!(
+            plan.lanes,
+            vec![
+                ExecutionLane::BuiltInModeration,
+                ExecutionLane::UnitDispatch,
+            ]
+        );
+        assert_eq!(
+            deferred_invocations,
+            vec![UnitDispatchInvocation {
+                unit_id: "moderation.mute.shadow".to_owned(),
+                exec_start: "scripts/moderation/mute_shadow.rhai".to_owned(),
+                entry_point: None,
+                trigger: UnitDispatchTrigger::Command {
+                    command: "mute".to_owned(),
+                },
+            }]
+        );
+        assert_eq!(
+            event.system.unit.as_ref().map(|unit| unit.id.as_str()),
+            expected_unit_id.as_deref()
+        );
+        assert_eq!(
+            event
+                .system
+                .unit
+                .as_ref()
+                .and_then(|unit| unit.trigger.as_deref()),
+            expected_unit_trigger.as_deref()
+        );
+        let ModerationEventResult::Executed(execution) = result else {
+            panic!("expected built-in moderation execution");
+        };
+        assert_eq!(
+            execution.audit_entries[0].unit_name,
+            "moderation.mute.shadow"
+        );
     }
 
     #[tokio::test]

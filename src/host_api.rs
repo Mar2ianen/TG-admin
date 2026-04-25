@@ -1,9 +1,7 @@
 use std::rc::Rc;
 
 use crate::event::EventContext;
-use crate::parser::duration::DurationParser;
 use crate::parser::reason::ReasonAliasRegistry;
-use crate::parser::target::TargetSelectorParser;
 use crate::storage::StorageConnection;
 use crate::unit::UnitRegistry;
 
@@ -46,8 +44,6 @@ pub struct HostApi {
     dry_run: bool,
     storage: Option<Rc<StorageConnection>>,
     unit_registry: Option<Rc<UnitRegistry>>,
-    target_parser: TargetSelectorParser,
-    duration_parser: DurationParser,
     aliases: ReasonAliasRegistry,
     ml_transport: Option<MlServerTransport>,
 }
@@ -58,8 +54,6 @@ impl HostApi {
             dry_run,
             storage: None,
             unit_registry: None,
-            target_parser: TargetSelectorParser::new(),
-            duration_parser: DurationParser::new(),
             aliases: ReasonAliasRegistry::new(),
             ml_transport: None,
         }

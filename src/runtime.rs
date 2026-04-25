@@ -7,14 +7,31 @@ use crate::moderation::ModerationEngine;
 use crate::router::ExecutionRouter;
 use crate::scheduler::Scheduler;
 use crate::shutdown::{ShutdownController, ShutdownReason};
+use crate::storage::JobRecord;
 use crate::storage::Storage;
 use crate::storage::StorageConnection;
-use crate::tg::{TelegramGateway, TeloxideCoreTransport};
+use crate::tg::{
+    ParseMode, TelegramExecutionOptions, TelegramGateway, TelegramRequest,
+    TelegramSendMessageRequest, TeloxideCoreTransport,
+};
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
+use tokio::time;
+
+// Runtime execution model: single-threaded by design.
+//
+// `StorageConnection` wraps `rusqlite::Connection` which is `!Send`. As a result,
+// the entire execution graph — `StorageConnection` → `ModerationEngine` →
+// `ExecutionRouter` → `RuntimeExecution` — is also `!Send`. Reference-counting
+// uses `Rc<>` instead of `Arc<>` to reflect this: there is no cross-thread sharing.
+//
+// The main async runtime uses `flavor = "current_thread"` (see `main.rs`), which
+// drives all futures on a single OS thread. This is intentional and sufficient for
+// a Telegram polling bot: the throughput bottleneck is the Telegram API rate limit,
+// not CPU parallelism.
 
 #[derive(Debug)]
 pub struct Runtime {
@@ -129,10 +146,149 @@ impl Runtime {
     }
 
     pub async fn run_until_shutdown(&self, shutdown: ShutdownController) -> Result<ShutdownReason> {
+        tokio::select! {
+            result = self.run_ingress_or_wait(shutdown) => result,
+            _ = self.run_scheduler_loop() => {
+                anyhow::bail!("scheduler loop terminated unexpectedly")
+            }
+        }
+    }
+
+    async fn run_ingress_or_wait(&self, shutdown: ShutdownController) -> Result<ShutdownReason> {
         match self.execution.ingress.as_ref() {
             Some(ingress) => ingress.run_until_shutdown(shutdown).await,
             None => shutdown.wait().await,
         }
+    }
+
+    async fn run_scheduler_loop(&self) {
+        // If no router is ready (e.g. before startup), park until cancelled.
+        if self.execution.router.is_none() {
+            std::future::pending::<()>().await;
+            return;
+        }
+
+        let tick = std::time::Duration::from_millis(self.services.scheduler.tick_interval_ms());
+        let mut interval = time::interval(tick);
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            if let Err(err) = self.tick_scheduler().await {
+                tracing::warn!(error = %err, "scheduler tick error");
+            }
+        }
+    }
+
+    async fn tick_scheduler(&self) -> Result<()> {
+        let storage = self
+            .services
+            .storage
+            .init()
+            .context("scheduler: failed to open storage connection")?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let limit = self.services.scheduler.max_concurrent_jobs();
+        let due_jobs = storage
+            .poll_due_jobs(&now, limit)
+            .context("scheduler: failed to poll due jobs")?;
+
+        for job in &due_jobs {
+            let claimed_at = chrono::Utc::now().to_rfc3339();
+            if let Err(err) =
+                storage.update_job_status(&job.job_id, "processing", None, &claimed_at)
+            {
+                tracing::warn!(job_id = %job.job_id, error = %err, "scheduler: failed to claim job");
+                continue;
+            }
+
+            let result = self.execute_scheduled_job(job).await;
+            let done_at = chrono::Utc::now().to_rfc3339();
+            match result {
+                Ok(()) => {
+                    tracing::debug!(
+                        job_id = %job.job_id,
+                        executor = %job.executor_unit,
+                        "scheduler: job completed"
+                    );
+                    if let Err(err) =
+                        storage.update_job_status(&job.job_id, "completed", None, &done_at)
+                    {
+                        tracing::warn!(
+                            job_id = %job.job_id,
+                            error = %err,
+                            "scheduler: failed to mark job completed"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        job_id = %job.job_id,
+                        executor = %job.executor_unit,
+                        error = %err,
+                        "scheduler: job execution failed"
+                    );
+                    let error_str = err.to_string();
+                    if let Err(mark_err) =
+                        storage.update_job_status(&job.job_id, "failed", Some(&error_str), &done_at)
+                    {
+                        tracing::warn!(
+                            job_id = %job.job_id,
+                            error = %mark_err,
+                            "scheduler: failed to mark job as failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn execute_scheduled_job(&self, job: &JobRecord) -> Result<()> {
+        match job.executor_unit.as_str() {
+            "moderation.pipe.message" => self.execute_pipe_message_job(job).await,
+            other => {
+                tracing::warn!(
+                    executor_unit = other,
+                    job_id = %job.job_id,
+                    "scheduler: unrecognized executor unit, skipping"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    async fn execute_pipe_message_job(&self, job: &JobRecord) -> Result<()> {
+        let payload: serde_json::Value = serde_json::from_str(&job.payload_json)
+            .context("scheduler: invalid pipe message payload JSON")?;
+
+        let chat_id = payload["chat_id"]
+            .as_i64()
+            .context("scheduler: pipe message job missing chat_id")?;
+
+        let text = payload["text"]
+            .as_str()
+            .context("scheduler: pipe message job missing text")?
+            .to_owned();
+
+        let request = TelegramRequest::SendMessage(TelegramSendMessageRequest {
+            chat_id,
+            text,
+            reply_to_message_id: None,
+            silent: false,
+            parse_mode: ParseMode::PlainText,
+            markup: None,
+        });
+
+        self.services
+            .telegram
+            .execute_checked(request, TelegramExecutionOptions { dry_run: false })
+            .await
+            .map(|_| ())
+            .map_err(|err| {
+                anyhow::anyhow!("scheduler: telegram error executing pipe message: {err}")
+            })
     }
 
     pub fn host_api(&self) -> Option<&HostApi> {
@@ -168,7 +324,10 @@ impl RuntimeServices {
                 config.runtime_storage_config()?,
             ),
             audit: AuditService::new(true),
-            scheduler: Scheduler::new(config.scheduler.tick_interval_ms),
+            scheduler: Scheduler::new(
+                config.scheduler.tick_interval_ms,
+                config.scheduler.max_concurrent_jobs,
+            ),
             telegram: match config.telegram.bot_token.as_deref() {
                 Some(token) => TelegramGateway::new(config.telegram.polling)
                     .with_transport(TeloxideCoreTransport::new(token.to_owned())),
@@ -268,9 +427,7 @@ mod tests {
         UnitContext,
     };
     use crate::router::ExecutionLane;
-    use crate::unit::{
-        ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
-    };
+    use crate::unit::{ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry};
     use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
@@ -402,10 +559,8 @@ ExecStart = "scripts/command/stats.rhai"
         let (_dir, config) = runtime_test_config();
         let mut runtime = Runtime::from_config(&config).expect("runtime builds");
 
-        runtime.registry = registry_from_manifests(vec![command_manifest(
-            "command.stats.unit",
-            "stats",
-        )]);
+        runtime.registry =
+            registry_from_manifests(vec![command_manifest("command.stats.unit", "stats")]);
         runtime.startup(&config).await.expect("startup succeeds");
 
         let stats_plan = runtime
@@ -415,10 +570,8 @@ ExecStart = "scripts/command/stats.rhai"
         assert!(stats_plan.lanes.contains(&ExecutionLane::UnitDispatch));
         assert_eq!(runtime.summary().indexed_command_routes, 7);
 
-        runtime.registry = registry_from_manifests(vec![command_manifest(
-            "command.audit.unit",
-            "audit",
-        )]);
+        runtime.registry =
+            registry_from_manifests(vec![command_manifest("command.audit.unit", "audit")]);
         runtime.refresh_router_index();
 
         let audit_plan = runtime

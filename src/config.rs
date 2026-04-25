@@ -148,8 +148,6 @@ pub struct StorageConfig {
     pub sqlite_journal_mode: String,
     pub sqlite_synchronous: String,
     pub sqlite_busy_timeout_ms: u64,
-    pub max_write_batch_size: usize,
-    pub write_flush_interval_ms: u64,
 }
 
 impl Default for StorageConfig {
@@ -158,8 +156,6 @@ impl Default for StorageConfig {
             sqlite_journal_mode: "WAL".to_owned(),
             sqlite_synchronous: "NORMAL".to_owned(),
             sqlite_busy_timeout_ms: 3_000,
-            max_write_batch_size: 256,
-            write_flush_interval_ms: 5_000,
         }
     }
 }
@@ -357,8 +353,6 @@ log_dir = "logs"
 sqlite_journal_mode = "WAL"
 sqlite_synchronous = "NORMAL"
 sqlite_busy_timeout_ms = 1000
-max_write_batch_size = 10
-write_flush_interval_ms = 250
 
 [runtime]
 tokio_worker_threads = 2
