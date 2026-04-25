@@ -304,25 +304,42 @@ fn callback_update_input(
     callback: &CallbackQuery,
     admin_user_ids: &[i64],
 ) -> Result<Option<TelegramUpdateInput>> {
-    let Some(message) = callback.regular_message() else {
+    let Some(maybe_message) = callback.message.as_ref() else {
         return Ok(None);
+    };
+
+    let regular_message = callback.regular_message();
+    let received_at = regular_message
+        .map(|message| message.date)
+        .unwrap_or_else(Utc::now);
+    let (chat, message, reply) = match regular_message {
+        Some(message) => (
+            chat_context(&message.chat, message),
+            Some(message_context(message)),
+            reply_context_from_message(message),
+        ),
+        None => (
+            chat_context_without_message(maybe_message.chat()),
+            None,
+            None,
+        ),
     };
 
     Ok(Some(TelegramUpdateInput {
         event_id: None,
         update_id: u64::from(update_id),
         update_type: UpdateType::CallbackQuery,
-        received_at: message.date,
+        received_at,
         execution_mode: crate::event::ExecutionMode::Realtime,
-        chat: chat_context(&message.chat, message),
+        chat,
         sender: Some(sender_context_from_user(&callback.from, admin_user_ids)),
-        message: Some(message_context(message)),
-        reply: reply_context_from_message(message),
+        message,
+        reply,
         callback: Some(CallbackContext {
             query_id: callback.id.to_string(),
             data: callback.data.clone(),
-            message_id: Some(message.id.0),
-            origin_chat_id: Some(message.chat.id.0),
+            message_id: Some(maybe_message.id().0),
+            origin_chat_id: Some(maybe_message.chat().id.0),
             from_user_id: callback.from.id.0 as i64,
         }),
         locale: callback.from.language_code.clone(),
@@ -587,7 +604,10 @@ mod tests {
                 TelegramRequest::SendMessage(request) => {
                     TelegramResult::Message(TelegramMessageResult {
                         chat_id: request.chat_id,
-                        message_id: request.reply_to_message_id.unwrap_or(MOCK_FALLBACK_SEND_ID).saturating_add(1),
+                        message_id: request
+                            .reply_to_message_id
+                            .unwrap_or(MOCK_FALLBACK_SEND_ID)
+                            .saturating_add(1),
                         raw_passthrough: false,
                     })
                 }
@@ -636,7 +656,10 @@ mod tests {
                 }
                 TelegramRequest::SendUi(request) => TelegramResult::Ui(TelegramUiResult {
                     chat_id: request.chat_id,
-                    message_id: request.reply_to_message_id.unwrap_or(MOCK_FALLBACK_UI_ID).saturating_add(1),
+                    message_id: request
+                        .reply_to_message_id
+                        .unwrap_or(MOCK_FALLBACK_UI_ID)
+                        .saturating_add(1),
                     template: request.template,
                     edited: false,
                     raw_passthrough: false,
@@ -858,6 +881,95 @@ mod tests {
                 .as_ref()
                 .map(|callback| callback.from_user_id),
             Some(42)
+        );
+    }
+
+    #[test]
+    fn callback_updates_keep_inaccessible_message_context() {
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432605,
+                "callback_query": {
+                    "id": "cbq-2",
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "chat_instance": "chat-instance-2",
+                    "data": "/undo",
+                    "message": {
+                        "chat": {
+                            "id": -1001293752024,
+                            "title": "CryptoInside Chat",
+                            "type": "supergroup",
+                            "username": "cryptoinside_talk"
+                        },
+                        "date": 0,
+                        "message_id": 134547
+                    }
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        let input = update_to_input_with_admin_user_ids(&update, &[42])
+            .expect("update converts")
+            .expect("update supported");
+        let event = EventNormalizer::new()
+            .normalize_telegram(input)
+            .expect("event normalizes");
+
+        assert_eq!(event.update_type, crate::event::UpdateType::CallbackQuery);
+        assert_eq!(
+            event.chat.as_ref().map(|chat| chat.id),
+            Some(-1001293752024)
+        );
+        assert!(event.message.is_none());
+        assert_eq!(
+            event
+                .callback
+                .as_ref()
+                .and_then(|callback| callback.message_id),
+            Some(134547)
+        );
+        assert_eq!(
+            event
+                .callback
+                .as_ref()
+                .and_then(|callback| callback.origin_chat_id),
+            Some(-1001293752024)
+        );
+    }
+
+    #[test]
+    fn inline_callback_without_message_context_stays_unsupported() {
+        let update = serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 439432606,
+                "callback_query": {
+                    "id": "cbq-inline",
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "chat_instance": "chat-instance-3",
+                    "inline_message_id": "AAEAAAE",
+                    "data": "/undo"
+                }
+            }"#,
+        )
+        .expect("update parses");
+
+        assert!(
+            update_to_input_with_admin_user_ids(&update, &[42])
+                .expect("update converts")
+                .is_none()
         );
     }
 
