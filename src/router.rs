@@ -6,9 +6,11 @@ use crate::event::{
     AuthorSourceClass, ChatRouteClass, CommandSource, EventContext, ExecutionMode,
     MessageContentKind, UnitContext, UpdateType,
 };
+use crate::host_api::HostApi;
 use crate::moderation::{
     ModerationEngine, ModerationError, ModerationEventResult, ModerationUnitPolicy,
 };
+use crate::script::ScriptRunner;
 use crate::unit::{TriggerSpec, UnitEventType, UnitRegistry, UnitStatus};
 use regex::Regex;
 
@@ -346,6 +348,8 @@ pub struct ExecutionRouter {
     index: Rc<RefCell<RouterIndex>>,
     moderation: Option<ModerationEngine>,
     registry: Rc<RefCell<UnitRegistry>>,
+    script_runner: Option<ScriptRunner>,
+    host_api: Option<HostApi>,
 }
 
 impl ExecutionRouter {
@@ -354,6 +358,8 @@ impl ExecutionRouter {
             index: Rc::new(RefCell::new(RouterIndex::default())),
             moderation: None,
             registry: Rc::new(RefCell::new(UnitRegistry::default())),
+            script_runner: None,
+            host_api: None,
         }
     }
 
@@ -364,6 +370,13 @@ impl ExecutionRouter {
 
     pub fn with_moderation(mut self, moderation: ModerationEngine) -> Self {
         self.moderation = Some(moderation);
+        self
+    }
+
+    /// Wire in a Rhai script runner and the HostApi it uses for bridge callbacks.
+    pub fn with_script_runner(mut self, runner: ScriptRunner, host_api: HostApi) -> Self {
+        self.script_runner = Some(runner);
+        self.host_api = Some(host_api);
         self
     }
 
@@ -412,6 +425,40 @@ impl ExecutionRouter {
         }
 
         if plan.lanes.contains(&ExecutionLane::UnitDispatch) && !unit_invocations.is_empty() {
+            match (&self.script_runner, &self.host_api) {
+                (Some(runner), Some(host_api)) => {
+                    for invocation in &unit_invocations {
+                        match runner.execute(
+                            &invocation.exec_start,
+                            invocation.entry_point.as_deref(),
+                            event,
+                            host_api,
+                        ) {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    unit_id = %invocation.unit_id,
+                                    exec_start = %invocation.exec_start,
+                                    "unit script executed"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    unit_id = %invocation.unit_id,
+                                    exec_start = %invocation.exec_start,
+                                    error = %err,
+                                    "unit script execution failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    tracing::debug!(
+                        count = unit_invocations.len(),
+                        "unit dispatch: no script runner configured, invocations skipped"
+                    );
+                }
+            }
             return Ok(ExecutionOutcome::UnitDispatch {
                 plan,
                 invocations: unit_invocations,

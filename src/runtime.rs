@@ -6,6 +6,7 @@ use crate::ingress::IngressPipeline;
 use crate::moderation::ModerationEngine;
 use crate::router::ExecutionRouter;
 use crate::scheduler::Scheduler;
+use crate::script::ScriptRunner;
 use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::JobRecord;
 use crate::storage::Storage;
@@ -69,12 +70,18 @@ impl Runtime {
             .storage
             .init()
             .context("failed to open ingress storage during runtime startup")?;
+        let script_storage = self
+            .services
+            .storage
+            .init()
+            .context("failed to open script storage during runtime startup")?;
 
         self.execution = self.compose_execution(
             config,
             moderation_storage,
             host_api_storage,
             ingress_storage,
+            script_storage,
         );
 
         Ok(RuntimeBootstrapInfo { schema_version })
@@ -86,6 +93,7 @@ impl Runtime {
         moderation_storage: StorageConnection,
         host_api_storage: StorageConnection,
         ingress_storage: StorageConnection,
+        script_storage: StorageConnection,
     ) -> RuntimeExecution {
         let registry_handle = Rc::new(self.registry.clone());
         let host_api = HostApi::new(false)
@@ -93,13 +101,19 @@ impl Runtime {
             .with_unit_registry_handle(registry_handle.clone())
             .with_ml_server_transport(self.services.ml_server_transport.clone());
         let moderation = ModerationEngine::new(moderation_storage, self.services.telegram.clone())
-            .with_unit_registry_handle(registry_handle)
+            .with_unit_registry_handle(registry_handle.clone())
             .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
             .without_processed_update_guard();
+        let script_host_api = HostApi::new(false)
+            .with_storage(script_storage)
+            .with_unit_registry_handle(registry_handle.clone())
+            .with_ml_server_transport(self.services.ml_server_transport.clone());
+        let script_runner = ScriptRunner::new(config.paths.scripts_dir.clone());
         let router = Rc::new(
             ExecutionRouter::new()
                 .with_registry(self.registry.clone())
-                .with_moderation(moderation),
+                .with_moderation(moderation)
+                .with_script_runner(script_runner, script_host_api),
         );
         let ingress = self.services.polling_bot().map(|bot| {
             IngressPipeline::new(bot, ingress_storage, router.clone())

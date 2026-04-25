@@ -10,6 +10,7 @@ pub mod parser;
 pub mod router;
 pub mod runtime;
 pub mod scheduler;
+pub mod script;
 pub mod shutdown;
 pub mod storage;
 pub mod tg;

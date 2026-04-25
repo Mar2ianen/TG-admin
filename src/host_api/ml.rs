@@ -51,12 +51,13 @@ pub struct MlHealthValue {
     pub transport_ready: bool,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MlEmbedTextValue {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub input_count: usize,
     pub transport_ready: bool,
+    pub embeddings: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -66,6 +67,7 @@ pub struct MlChatCompletionsValue {
     pub message_count: usize,
     pub max_tokens: Option<u32>,
     pub transport_ready: bool,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -190,6 +192,106 @@ impl MlServerTransport {
             ))
         })
     }
+
+    /// Call `/v1/chat/completions` (OpenAI-compatible endpoint, e.g. Ollama).
+    /// Returns the assistant's reply text from the first choice.
+    pub fn chat_completions(
+        &self,
+        base_url: Option<&str>,
+        model: &str,
+        messages: Vec<MlChatMessage>,
+        max_tokens: Option<u32>,
+        operation: HostApiOperation,
+    ) -> Result<Option<String>, HostApiError> {
+        let client = self.client.clone();
+        let resolved_base_url = self.resolve_base_url(base_url, operation)?;
+        let model = model.to_owned();
+
+        run_request(async move {
+            let url = join_path(&resolved_base_url, "v1/chat/completions", operation)?;
+
+            let mut body = serde_json::json!({
+                "model": model,
+                "messages": messages.iter().map(|m| serde_json::json!({
+                    "role": m.role,
+                    "content": m.content
+                })).collect::<Vec<_>>(),
+                "stream": false,
+            });
+            if let Some(max_tokens) = max_tokens {
+                body["max_tokens"] = serde_json::json!(max_tokens);
+            }
+
+            let response = client
+                .post(url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| transport_error(operation, e.to_string()))?;
+
+            if !response.status().is_success() {
+                return Err(transport_error(
+                    operation,
+                    format!("ml server returned HTTP {}", response.status()),
+                ));
+            }
+
+            let completion: ChatCompletionResponse = response
+                .json()
+                .await
+                .map_err(|e| transport_error(operation, e.to_string()))?;
+
+            Ok(completion
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.message.content))
+        })
+    }
+
+    /// Call `/v1/embeddings` (OpenAI-compatible endpoint, e.g. Ollama).
+    /// Returns one embedding vector per input string.
+    pub fn embed(
+        &self,
+        base_url: Option<&str>,
+        model: Option<&str>,
+        inputs: Vec<String>,
+        operation: HostApiOperation,
+    ) -> Result<Vec<Vec<f32>>, HostApiError> {
+        let client = self.client.clone();
+        let resolved_base_url = self.resolve_base_url(base_url, operation)?;
+        let model = model.map(ToOwned::to_owned);
+
+        run_request(async move {
+            let url = join_path(&resolved_base_url, "v1/embeddings", operation)?;
+
+            let body = serde_json::json!({
+                "model": model,
+                "input": inputs,
+            });
+
+            let response = client
+                .post(url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| transport_error(operation, e.to_string()))?;
+
+            if !response.status().is_success() {
+                return Err(transport_error(
+                    operation,
+                    format!("ml server returned HTTP {}", response.status()),
+                ));
+            }
+
+            let embed_resp: EmbeddingResponse = response
+                .json()
+                .await
+                .map_err(|e| transport_error(operation, e.to_string()))?;
+
+            Ok(embed_resp.data.into_iter().map(|d| d.embedding).collect())
+        })
+    }
 }
 
 fn run_request<T>(future: impl Future<Output = T> + Send + 'static) -> T
@@ -236,6 +338,31 @@ pub struct MlModelResponse {
 pub struct MlModelsResponse {
     #[serde(default)]
     pub data: Vec<MlModelResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionResponse {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    message: ChatChoiceMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoiceMessage {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingResponse {
+    data: Vec<EmbeddingData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingData {
+    embedding: Vec<f32>,
 }
 
 impl HostApi {
@@ -287,17 +414,37 @@ impl HostApi {
         validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlEmbedText)?;
         validate_ml_embed_request(&request)?;
 
-        let value = MlEmbedTextValue {
-            base_url: request.base_url,
-            model: request.model,
-            input_count: request.input.len(),
-            transport_ready: false,
-        };
         if self.dry_run() {
-            return Ok(self.response(HostApiOperation::MlEmbedText, value));
+            return Ok(self.response(
+                HostApiOperation::MlEmbedText,
+                MlEmbedTextValue {
+                    base_url: request.base_url,
+                    model: request.model,
+                    input_count: request.input.len(),
+                    transport_ready: false,
+                    embeddings: Vec::new(),
+                },
+            ));
         }
 
-        Err(ml_runtime_unavailable(HostApiOperation::MlEmbedText))
+        let transport = self.ml_transport(HostApiOperation::MlEmbedText)?;
+        let embeddings = transport.embed(
+            request.base_url.as_deref(),
+            request.model.as_deref(),
+            request.input.clone(),
+            HostApiOperation::MlEmbedText,
+        )?;
+
+        Ok(self.response(
+            HostApiOperation::MlEmbedText,
+            MlEmbedTextValue {
+                base_url: request.base_url,
+                model: request.model,
+                input_count: request.input.len(),
+                transport_ready: true,
+                embeddings,
+            },
+        ))
     }
 
     pub fn ml_chat_completions(
@@ -313,18 +460,40 @@ impl HostApi {
         )?;
         validate_ml_chat_request(&request)?;
 
-        let value = MlChatCompletionsValue {
-            base_url: request.base_url,
-            model: request.model,
-            message_count: request.messages.len(),
-            max_tokens: request.max_tokens,
-            transport_ready: false,
-        };
         if self.dry_run() {
-            return Ok(self.response(HostApiOperation::MlChatCompletions, value));
+            return Ok(self.response(
+                HostApiOperation::MlChatCompletions,
+                MlChatCompletionsValue {
+                    base_url: request.base_url,
+                    model: request.model,
+                    message_count: request.messages.len(),
+                    max_tokens: request.max_tokens,
+                    transport_ready: false,
+                    content: None,
+                },
+            ));
         }
 
-        Err(ml_runtime_unavailable(HostApiOperation::MlChatCompletions))
+        let transport = self.ml_transport(HostApiOperation::MlChatCompletions)?;
+        let content = transport.chat_completions(
+            request.base_url.as_deref(),
+            &request.model,
+            request.messages.clone(),
+            request.max_tokens,
+            HostApiOperation::MlChatCompletions,
+        )?;
+
+        Ok(self.response(
+            HostApiOperation::MlChatCompletions,
+            MlChatCompletionsValue {
+                base_url: request.base_url,
+                model: request.model,
+                message_count: request.messages.len(),
+                max_tokens: request.max_tokens,
+                transport_ready: true,
+                content,
+            },
+        ))
     }
 
     pub fn ml_models(

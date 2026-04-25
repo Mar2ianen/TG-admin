@@ -4,6 +4,19 @@ use tracing::level_filters::LevelFilter;
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
+/// Initialises the global tracing subscriber from `AppConfig`.
+///
+/// When `config.observability.json_logs` is `true` the subscriber emits
+/// newline-delimited JSON (suitable for log-aggregation pipelines).
+/// When it is `false` the subscriber emits compact human-readable text.
+///
+/// The log level is taken from `config.observability.log_level` and can be
+/// overridden at runtime via the `RUST_LOG` environment variable.
+/// An unrecognised level string falls back to `info` with a warning.
+///
+/// This function must be called exactly once per process; subsequent calls
+/// will return an error from the underlying `tracing-subscriber` global
+/// dispatcher guard.
 pub fn init_logging(config: &AppConfig) -> Result<()> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(parse_level(&config.observability.log_level))
