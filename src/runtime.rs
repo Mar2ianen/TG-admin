@@ -4,7 +4,7 @@ use crate::host_api::HostApi;
 use crate::host_api::MlServerTransport;
 use crate::ingress::IngressPipeline;
 use crate::moderation::ModerationEngine;
-use crate::router::{ExecutionRouter, RouterIndex};
+use crate::router::ExecutionRouter;
 use crate::scheduler::Scheduler;
 use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::Storage;
@@ -82,7 +82,6 @@ impl Runtime {
         let router = Rc::new(
             ExecutionRouter::new()
                 .with_registry(self.registry.clone())
-                .with_index(RouterIndex::from_registry(&self.registry))
                 .with_moderation(moderation),
         );
         let ingress = self.services.polling_bot().map(|bot| {
@@ -142,6 +141,12 @@ impl Runtime {
 
     pub fn router(&self) -> Option<&ExecutionRouter> {
         self.execution.router.as_deref()
+    }
+
+    pub fn refresh_router_index(&mut self) {
+        if let Some(router) = self.execution.router.as_ref() {
+            router.sync_registry(self.registry.clone());
+        }
     }
 }
 
@@ -258,6 +263,15 @@ fn load_registry_from_units_dir(config: &AppConfig) -> Result<UnitRegistry> {
 mod tests {
     use super::Runtime;
     use crate::config::AppConfig;
+    use crate::event::{
+        ChatContext, EventContext, EventNormalizer, ManualInvocationInput, SenderContext,
+        UnitContext,
+    };
+    use crate::router::ExecutionLane;
+    use crate::unit::{
+        ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
+    };
+    use chrono::{TimeZone, Utc};
     use tempfile::TempDir;
 
     fn runtime_test_config() -> (TempDir, AppConfig) {
@@ -272,6 +286,48 @@ mod tests {
         let units_dir = dir.path().join("units");
         std::fs::create_dir_all(&units_dir).expect("units dir");
         std::fs::write(units_dir.join(file_name), body).expect("manifest written");
+    }
+
+    fn registry_from_manifests(manifests: Vec<UnitManifest>) -> UnitRegistry {
+        UnitRegistry::load_manifests(manifests).registry
+    }
+
+    fn command_manifest(name: &str, command: &str) -> UnitManifest {
+        UnitManifest::new(
+            UnitDefinition::new(name),
+            TriggerSpec::command([command]),
+            ServiceSpec::new(format!("scripts/{name}.rhai")),
+        )
+    }
+
+    fn manual_event(command_text: &str) -> EventContext {
+        let mut input = ManualInvocationInput::new(
+            UnitContext::new("runtime.test").with_trigger("manual"),
+            command_text,
+        );
+        input.received_at = Utc
+            .with_ymd_and_hms(2026, 4, 22, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        input.chat = Some(ChatContext {
+            id: -100123,
+            chat_type: "supergroup".to_owned(),
+            title: Some("Moderation HQ".to_owned()),
+            username: Some("mod_hq".to_owned()),
+            thread_id: Some(11),
+        });
+        input.sender = Some(SenderContext {
+            id: 42,
+            username: Some("admin".to_owned()),
+            display_name: Some("Admin".to_owned()),
+            is_bot: false,
+            is_admin: true,
+            role: Some("owner".to_owned()),
+        });
+
+        EventNormalizer::new()
+            .normalize_manual(input)
+            .expect("manual event normalizes")
     }
 
     #[test]
@@ -339,6 +395,44 @@ ExecStart = "scripts/command/stats.rhai"
         assert_eq!(summary.transport_name, "noop");
         assert!(runtime.host_api().is_some());
         assert!(runtime.router().is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_and_refresh_use_the_live_registry_state() {
+        let (_dir, config) = runtime_test_config();
+        let mut runtime = Runtime::from_config(&config).expect("runtime builds");
+
+        runtime.registry = registry_from_manifests(vec![command_manifest(
+            "command.stats.unit",
+            "stats",
+        )]);
+        runtime.startup(&config).await.expect("startup succeeds");
+
+        let stats_plan = runtime
+            .router()
+            .expect("router is available")
+            .plan(&manual_event("/stats"));
+        assert!(stats_plan.lanes.contains(&ExecutionLane::UnitDispatch));
+        assert_eq!(runtime.summary().indexed_command_routes, 7);
+
+        runtime.registry = registry_from_manifests(vec![command_manifest(
+            "command.audit.unit",
+            "audit",
+        )]);
+        runtime.refresh_router_index();
+
+        let audit_plan = runtime
+            .router()
+            .expect("router is available")
+            .plan(&manual_event("/audit"));
+        let stale_plan = runtime
+            .router()
+            .expect("router is available")
+            .plan(&manual_event("/stats"));
+
+        assert!(audit_plan.lanes.contains(&ExecutionLane::UnitDispatch));
+        assert!(!stale_plan.lanes.contains(&ExecutionLane::UnitDispatch));
+        assert_eq!(runtime.summary().indexed_command_routes, 7);
     }
 
     #[test]

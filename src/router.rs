@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::event::{
     AuthorSourceClass, ChatRouteClass, CommandSource, EventContext, ExecutionMode,
@@ -355,23 +357,23 @@ impl Default for RouterIndex {
 #[derive(Debug, Clone)]
 pub struct ExecutionRouter {
     classifier: EventClassifier,
-    index: RouterIndex,
+    index: Rc<RefCell<RouterIndex>>,
     moderation: Option<ModerationEngine>,
-    registry: UnitRegistry,
+    registry: Rc<RefCell<UnitRegistry>>,
 }
 
 impl ExecutionRouter {
     pub fn new() -> Self {
         Self {
             classifier: EventClassifier::new(),
-            index: RouterIndex::default(),
+            index: Rc::new(RefCell::new(RouterIndex::default())),
             moderation: None,
-            registry: UnitRegistry::default(),
+            registry: Rc::new(RefCell::new(UnitRegistry::default())),
         }
     }
 
-    pub fn with_index(mut self, index: RouterIndex) -> Self {
-        self.index = index;
+    pub fn with_index(self, index: RouterIndex) -> Self {
+        *self.index.borrow_mut() = index;
         self
     }
 
@@ -380,23 +382,31 @@ impl ExecutionRouter {
         self
     }
 
-    pub fn with_registry(mut self, registry: UnitRegistry) -> Self {
-        self.index = RouterIndex::from_registry(&registry);
-        self.registry = registry;
+    pub fn with_registry(self, registry: UnitRegistry) -> Self {
+        self.sync_registry(registry);
         self
     }
 
     pub fn plan(&self, event: &EventContext) -> RoutePlan {
-        self.index.plan(self.classifier.classify(event))
+        self.index.borrow().plan(self.classifier.classify(event))
     }
 
     pub fn index_stats(&self) -> RouterIndexStats {
-        self.index.stats()
+        self.index.borrow().stats()
+    }
+
+    pub fn sync_registry(&self, registry: UnitRegistry) {
+        let index = RouterIndex::from_registry(&registry);
+        *self.registry.borrow_mut() = registry;
+        *self.index.borrow_mut() = index;
     }
 
     pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
         let plan = self.plan(event);
-        let unit_invocations = select_unit_dispatches(&self.registry, event);
+        let unit_invocations = {
+            let registry = self.registry.borrow();
+            select_unit_dispatches(&registry, event)
+        };
 
         if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
             let deferred_lanes = deferred_lanes(&plan, ExecutionLane::BuiltInModeration);
@@ -1156,6 +1166,50 @@ mod tests {
         assert!(callback_plan.lanes.contains(&ExecutionLane::UnitDispatch));
     }
 
+    #[test]
+    fn router_sync_registry_rebuilds_from_live_registry_state() {
+        let stats_manifest = UnitManifest::new(
+            UnitDefinition::new("command.stats.unit"),
+            TriggerSpec::command(["stats"]),
+            ServiceSpec::new("scripts/command/stats.rhai"),
+        );
+        let audit_manifest = UnitManifest::new(
+            UnitDefinition::new("command.audit.unit"),
+            TriggerSpec::command(["audit"]),
+            ServiceSpec::new("scripts/command/audit.rhai"),
+        );
+        let router = ExecutionRouter::new()
+            .with_registry(registry_from_manifests(vec![stats_manifest]));
+
+        assert!(
+            router
+                .plan(&manual_event("/stats"))
+                .lanes
+                .contains(&ExecutionLane::UnitDispatch)
+        );
+        assert!(
+            !router
+                .plan(&manual_event("/audit"))
+                .lanes
+                .contains(&ExecutionLane::UnitDispatch)
+        );
+
+        router.sync_registry(registry_from_manifests(vec![audit_manifest]));
+
+        assert!(
+            !router
+                .plan(&manual_event("/stats"))
+                .lanes
+                .contains(&ExecutionLane::UnitDispatch)
+        );
+        assert!(
+            router
+                .plan(&manual_event("/audit"))
+                .lanes
+                .contains(&ExecutionLane::UnitDispatch)
+        );
+    }
+
     #[tokio::test]
     async fn router_executes_built_in_moderation_for_indexed_command() {
         let router = router_with_moderation();
@@ -1196,8 +1250,7 @@ mod tests {
         );
         let registry = registry_from_manifests(vec![unit_manifest]);
         let router = router_with_moderation()
-            .with_registry(registry.clone())
-            .with_index(RouterIndex::from_registry(&registry));
+            .with_registry(registry.clone());
         let mut event = manual_event("/warn @spam spam");
         event.reply = Some(crate::event::ReplyContext {
             message_id: 900,
@@ -1253,7 +1306,6 @@ mod tests {
             .with_admin_user_ids([42]);
         let router = ExecutionRouter::new()
             .with_registry(registry.clone())
-            .with_index(RouterIndex::from_registry(&registry))
             .with_moderation(engine);
         let mut event = manual_event("/mute 30m spam");
         event.reply = Some(crate::event::ReplyContext {
