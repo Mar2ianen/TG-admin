@@ -198,8 +198,8 @@ pub fn resolve_target(
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_target, ParsedTargetSelector, ResolvedTarget, TargetParseError,
-        TargetSelectorParser, TargetSource,
+        ParsedTargetSelector, ResolvedTarget, TargetParseError, TargetSelectorParser, TargetSource,
+        resolve_target,
     };
     use crate::event::{
         EventContext, ExecutionMode, MessageContentKind, MessageContext, ReplyContext,

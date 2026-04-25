@@ -1278,8 +1278,8 @@ mod tests {
     };
     use async_trait::async_trait;
     use serde_json::{json, to_value};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct StaticTransport {
         result: TelegramResult,

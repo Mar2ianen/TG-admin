@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -17,8 +17,9 @@ use crate::parser::reason::{
 };
 use crate::parser::target::{ParsedTargetSelector, ResolvedTarget, TargetSource};
 use crate::storage::{
-    AuditLogEntry, AuditLogFilter, JobRecord, ProcessedUpdateRecord, StorageConnection,
-    StorageError, UserPatch, PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
+    AuditLogEntry, AuditLogFilter, JobRecord, PROCESSED_UPDATE_STATUS_COMPLETED,
+    PROCESSED_UPDATE_STATUS_PENDING, ProcessedUpdateRecord, StorageConnection, StorageError,
+    UserPatch,
 };
 use crate::tg::{
     MessageId, TelegramBanRequest, TelegramExecution, TelegramExecutionOptions, TelegramGateway,
@@ -1298,8 +1299,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::storage::{
-        AuditLogFilter, MessageJournalRecord, ProcessedUpdateRecord, Storage,
-        PROCESSED_UPDATE_STATUS_PENDING,
+        AuditLogFilter, MessageJournalRecord, PROCESSED_UPDATE_STATUS_PENDING,
+        ProcessedUpdateRecord, Storage,
     };
 
     #[derive(Debug, Default)]
@@ -1647,11 +1648,13 @@ mod tests {
             } if capability == "job.schedule" && unit_id == "moderation.test"
         ));
         assert!(requests.lock().expect("requests").is_empty());
-        assert!(engine
-            .storage
-            .find_audit_entries(&AuditLogFilter::default(), 10)
-            .expect("audit lookup")
-            .is_empty());
+        assert!(
+            engine
+                .storage
+                .find_audit_entries(&AuditLogFilter::default(), 10)
+                .expect("audit lookup")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

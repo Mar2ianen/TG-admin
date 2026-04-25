@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1095,9 +1095,9 @@ fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditLogEntry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditLogEntry, JobRecord, JournalMode, KvEntry, ProcessedUpdateRecord, Storage,
-        StorageConfig, SynchronousMode, TempStoreMode, UserPatch, CURRENT_SCHEMA_VERSION,
-        MIGRATION_V1_SQL, PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
+        AuditLogEntry, CURRENT_SCHEMA_VERSION, JobRecord, JournalMode, KvEntry, MIGRATION_V1_SQL,
+        PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING, ProcessedUpdateRecord,
+        Storage, StorageConfig, SynchronousMode, TempStoreMode, UserPatch,
     };
     use std::collections::BTreeSet;
 

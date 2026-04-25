@@ -27,12 +27,13 @@ fn job_schedule_after_dry_run_validates_without_mutation() {
 
     assert!(response.dry_run);
     assert_eq!(response.value.job.status, "scheduled");
-    assert!(api
-        .storage(HostApiOperation::JobScheduleAfter)
-        .expect("storage")
-        .get_job(&response.value.job.job_id)
-        .expect("job lookup succeeds")
-        .is_none());
+    assert!(
+        api.storage(HostApiOperation::JobScheduleAfter)
+            .expect("storage")
+            .get_job(&response.value.job.job_id)
+            .expect("job lookup succeeds")
+            .is_none()
+    );
 }
 
 #[test]
@@ -85,12 +86,13 @@ fn job_schedule_after_persists_job_on_happy_path() {
 
     assert!(!response.dry_run);
     assert_eq!(response.value.job.executor_unit, "moderation.mute_release");
-    assert!(api
-        .storage(HostApiOperation::JobScheduleAfter)
-        .expect("storage")
-        .get_job(&response.value.job.job_id)
-        .expect("lookup succeeds")
-        .is_some());
+    assert!(
+        api.storage(HostApiOperation::JobScheduleAfter)
+            .expect("storage")
+            .get_job(&response.value.job.job_id)
+            .expect("lookup succeeds")
+            .is_some()
+    );
 }
 
 #[test]
@@ -269,12 +271,13 @@ fn audit_compensate_dry_run_does_not_append_entry() {
         .new_action_id
         .clone()
         .expect("predicted action id returned");
-    assert!(api
-        .storage(HostApiOperation::AuditCompensate)
-        .expect("storage")
-        .get_audit_entry(&new_action_id)
-        .expect("lookup succeeds")
-        .is_none());
+    assert!(
+        api.storage(HostApiOperation::AuditCompensate)
+            .expect("storage")
+            .get_audit_entry(&new_action_id)
+            .expect("lookup succeeds")
+            .is_none()
+    );
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use telegram_moderation_os::event::{
     ChatContext, EventNormalizer, ExecutionMode, MessageContentKind, MessageContext, SenderContext,
     SystemContext, UpdateType,

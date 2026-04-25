@@ -17,8 +17,8 @@ use crate::event::{
 use crate::router::ExecutionRouter;
 use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::{
-    MessageJournalRecord, ProcessedUpdateRecord, StorageConnection,
-    PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
+    MessageJournalRecord, PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING,
+    ProcessedUpdateRecord, StorageConnection,
 };
 
 const POLL_LIMIT: u8 = 32;
@@ -382,7 +382,7 @@ fn chat_context_without_message(chat: &Chat) -> ChatContext {
 }
 
 fn message_thread_id(message: &Message) -> Option<i64> {
-    message.thread_id.map(|thread_id| i64::from(thread_id.0 .0))
+    message.thread_id.map(|thread_id| i64::from(thread_id.0.0))
 }
 
 fn sender_context_from_message(message: &Message, admin_user_ids: &[i64]) -> Option<SenderContext> {
@@ -520,15 +520,15 @@ fn update_type_name(update_type: UpdateType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{update_to_input_with_admin_user_ids, IngressPipeline, IngressProcessResult};
+    use super::{IngressPipeline, IngressProcessResult, update_to_input_with_admin_user_ids};
     use crate::event::{
         ChatContext, EventNormalizer, MessageContext, SenderContext, TelegramUpdateInput,
     };
     use crate::moderation::ModerationEngine;
     use crate::router::{ExecutionOutcome, ExecutionRouter};
     use crate::storage::{
-        AuditLogFilter, MessageJournalRecord, Storage, StorageConnection,
-        PROCESSED_UPDATE_STATUS_COMPLETED,
+        AuditLogFilter, MessageJournalRecord, PROCESSED_UPDATE_STATUS_COMPLETED, Storage,
+        StorageConnection,
     };
     use crate::tg::{
         TelegramDeleteResult, TelegramGateway, TelegramMessageResult, TelegramRequest,
@@ -556,11 +556,18 @@ mod tests {
         (dir, pipeline, inspect_storage)
     }
 
+    #[cfg(test)]
+    const MOCK_FALLBACK_SEND_ID: i32 = 900;
+    #[cfg(test)]
+    const MOCK_FALLBACK_UI_ID: i32 = 700;
+
+    #[cfg(test)]
     #[derive(Debug, Default)]
     struct RecordingTransport {
         requests: Arc<Mutex<Vec<TelegramRequest>>>,
     }
 
+    #[cfg(test)]
     #[async_trait]
     impl TelegramTransport for RecordingTransport {
         fn name(&self) -> &'static str {
@@ -580,7 +587,7 @@ mod tests {
                 TelegramRequest::SendMessage(request) => {
                     TelegramResult::Message(TelegramMessageResult {
                         chat_id: request.chat_id,
-                        message_id: request.reply_to_message_id.unwrap_or(900).saturating_add(1),
+                        message_id: request.reply_to_message_id.unwrap_or(MOCK_FALLBACK_SEND_ID).saturating_add(1),
                         raw_passthrough: false,
                     })
                 }
@@ -629,7 +636,7 @@ mod tests {
                 }
                 TelegramRequest::SendUi(request) => TelegramResult::Ui(TelegramUiResult {
                     chat_id: request.chat_id,
-                    message_id: request.reply_to_message_id.unwrap_or(700).saturating_add(1),
+                    message_id: request.reply_to_message_id.unwrap_or(MOCK_FALLBACK_UI_ID).saturating_add(1),
                     template: request.template,
                     edited: false,
                     raw_passthrough: false,
