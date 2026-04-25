@@ -1,6 +1,4 @@
-use crate::storage::{
-    JournalMode, StorageConfig as RuntimeStorageConfig, SynchronousMode, TempStoreMode,
-};
+use crate::storage::{JournalMode, SynchronousMode, TempStoreMode};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -12,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub struct AppConfig {
     pub telegram: TelegramConfig,
     pub paths: PathsConfig,
-    pub storage: StorageConfig,
+    pub storage: ConfigStorage,
     pub runtime: RuntimeConfig,
     pub ml_server: MlServerConfig,
     pub limits: LimitsConfig,
@@ -50,11 +48,11 @@ impl AppConfig {
             .with_context(|| format!("failed to parse config from {}", path.display()))
     }
 
-    pub fn runtime_storage_config(&self) -> Result<RuntimeStorageConfig> {
+    pub fn runtime_storage_config(&self) -> Result<crate::storage::StorageConfig> {
         let journal_mode = parse_journal_mode(&self.storage.sqlite_journal_mode)?;
         let synchronous = parse_synchronous_mode(&self.storage.sqlite_synchronous)?;
 
-        Ok(RuntimeStorageConfig {
+        Ok(crate::storage::StorageConfig {
             busy_timeout: std::time::Duration::from_millis(self.storage.sqlite_busy_timeout_ms),
             journal_mode,
             synchronous,
@@ -144,18 +142,18 @@ impl Default for PathsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct StorageConfig {
+pub struct ConfigStorage {
     pub sqlite_journal_mode: String,
     pub sqlite_synchronous: String,
     pub sqlite_busy_timeout_ms: u64,
 }
 
-impl Default for StorageConfig {
+impl Default for ConfigStorage {
     fn default() -> Self {
         Self {
             sqlite_journal_mode: "WAL".to_owned(),
             sqlite_synchronous: "NORMAL".to_owned(),
-            sqlite_busy_timeout_ms: 3_000,
+            sqlite_busy_timeout_ms: 5000,
         }
     }
 }
