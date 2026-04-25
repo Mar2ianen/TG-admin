@@ -1,5 +1,4 @@
 use crate::config::AppConfig;
-use crate::event::EventContext;
 use crate::runtime::Runtime;
 use crate::shutdown::{ShutdownController, ShutdownReason};
 use anyhow::{Context, Result};
@@ -20,12 +19,11 @@ impl Application {
     }
 
     fn from_config_with_shutdown(config: AppConfig, shutdown: ShutdownController) -> Result<Self> {
-        let startup_event = EventContext::system_event();
         let runtime = Runtime::from_config(&config)?;
 
         Ok(Self {
             config,
-            state: ApplicationState::new(startup_event),
+            state: ApplicationState::new(),
             runtime,
             shutdown,
         })
@@ -48,9 +46,6 @@ impl Application {
 
         let summary = self.runtime.summary();
         info!(
-            event_id = %self.state.startup_event.event_id,
-            update_type = ?self.state.startup_event.update_type,
-            execution_mode = ?self.state.startup_event.execution_mode,
             database_path = %summary.database_path.display(),
             storage_schema_version = startup.schema_version,
             units_loaded = summary.registry.total_units,
@@ -107,16 +102,14 @@ impl Application {
 #[derive(Debug)]
 struct ApplicationState {
     lifecycle: LifecycleState,
-    startup_event: EventContext,
     started_at: Option<DateTime<Utc>>,
     stopped_at: Option<DateTime<Utc>>,
 }
 
 impl ApplicationState {
-    fn new(startup_event: EventContext) -> Self {
+    fn new() -> Self {
         Self {
             lifecycle: LifecycleState::Created,
-            startup_event,
             started_at: None,
             stopped_at: None,
         }
@@ -183,6 +176,23 @@ mod tests {
         assert_eq!(app.state.lifecycle, LifecycleState::Stopped);
         assert!(app.state.started_at.is_some());
         assert!(app.state.stopped_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_keeps_application_as_lifecycle_shell_while_runtime_is_wired() {
+        let (_dir, config) = app_test_config();
+        let mut app =
+            Application::from_config_with_shutdown(config, ShutdownController::immediate())
+                .expect("application builds");
+
+        assert_eq!(app.state.lifecycle, LifecycleState::Created);
+        assert!(!app.runtime.summary().router_ready);
+
+        app.startup().await.expect("startup succeeds");
+
+        assert_eq!(app.state.lifecycle, LifecycleState::Running);
+        assert!(app.runtime.summary().router_ready);
+        assert!(app.runtime.host_api().is_some());
     }
 
     #[test]
@@ -263,22 +273,5 @@ mod tests {
 
         let error = app.startup().await.expect_err("startup must fail");
         assert!(error.to_string().contains("failed to bootstrap runtime"));
-    }
-
-    #[tokio::test]
-    async fn startup_wires_router_and_host_api_into_runtime() {
-        let (_dir, config) = app_test_config();
-        let mut app =
-            Application::from_config_with_shutdown(config, ShutdownController::immediate())
-                .expect("application builds");
-
-        app.startup().await.expect("startup succeeds");
-
-        let summary = app.runtime.summary();
-        assert!(summary.router_ready);
-        assert_eq!(summary.transport_name, "noop");
-        assert_eq!(summary.indexed_command_routes, 6);
-        assert!(app.runtime.host_api().is_some());
-        assert!(app.runtime.router().is_some());
     }
 }

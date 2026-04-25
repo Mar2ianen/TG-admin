@@ -8,6 +8,7 @@ use crate::router::{ExecutionRouter, RouterIndex};
 use crate::scheduler::Scheduler;
 use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::Storage;
+use crate::storage::StorageConnection;
 use crate::tg::{TelegramGateway, TeloxideCoreTransport};
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
@@ -52,7 +53,24 @@ impl Runtime {
             .init()
             .context("failed to open ingress storage during runtime startup")?;
 
-        let registry_handle = std::rc::Rc::new(self.registry.clone());
+        self.execution = self.compose_execution(
+            config,
+            moderation_storage,
+            host_api_storage,
+            ingress_storage,
+        );
+
+        Ok(RuntimeBootstrapInfo { schema_version })
+    }
+
+    fn compose_execution(
+        &self,
+        config: &AppConfig,
+        moderation_storage: StorageConnection,
+        host_api_storage: StorageConnection,
+        ingress_storage: StorageConnection,
+    ) -> RuntimeExecution {
+        let registry_handle = Rc::new(self.registry.clone());
         let host_api = HostApi::new(false)
             .with_storage(host_api_storage)
             .with_unit_registry_handle(registry_handle.clone())
@@ -72,13 +90,11 @@ impl Runtime {
                 .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
         });
 
-        self.execution = RuntimeExecution {
+        RuntimeExecution {
             host_api: Some(host_api),
             router: Some(router),
             ingress,
-        };
-
-        Ok(RuntimeBootstrapInfo { schema_version })
+        }
     }
 
     pub fn summary(&self) -> RuntimeSummary<'_> {
@@ -320,6 +336,8 @@ ExecStart = "scripts/command/stats.rhai"
 
         assert!(summary.router_ready);
         assert_eq!(summary.indexed_command_routes, 7);
+        assert_eq!(summary.transport_name, "noop");
+        assert!(runtime.host_api().is_some());
         assert!(runtime.router().is_some());
     }
 
