@@ -9,11 +9,14 @@ pub use types::*;
 use crate::event::{EventContext, ExecutionMode, UnitContext, UpdateType};
 use crate::moderation::{ModerationEngine, ModerationEventResult, ModerationUnitPolicy};
 use crate::unit::{UnitRegistry, UnitStatus};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionRouter {
-    index: RouterIndex,
+    index: RefCell<RouterIndex>,
+    registry: RefCell<Option<Rc<UnitRegistry>>>,
     moderation: Option<ModerationEngine>,
     script_runner: Option<crate::script::ScriptRunner>,
 }
@@ -21,7 +24,8 @@ pub struct ExecutionRouter {
 impl ExecutionRouter {
     pub fn new() -> Self {
         Self {
-            index: RouterIndex::new(),
+            index: RefCell::new(RouterIndex::new()),
+            registry: RefCell::new(None),
             moderation: None,
             script_runner: None,
         }
@@ -32,8 +36,15 @@ impl ExecutionRouter {
         self
     }
 
-    pub fn with_registry(mut self, registry: UnitRegistry) -> Self {
-        self.index = RouterIndex::from_registry(&registry);
+    pub fn with_registry(self, registry: UnitRegistry) -> Self {
+        *self.index.borrow_mut() = RouterIndex::from_registry(&registry);
+        *self.registry.borrow_mut() = Some(Rc::new(registry));
+        self
+    }
+
+    pub fn with_registry_handle(self, registry: Rc<UnitRegistry>) -> Self {
+        *self.index.borrow_mut() = RouterIndex::from_registry(&registry);
+        *self.registry.borrow_mut() = Some(registry);
         self
     }
 
@@ -47,42 +58,53 @@ impl ExecutionRouter {
     }
 
     pub fn index_stats(&self) -> RouterIndexStats {
-        self.index.stats()
+        self.index.borrow().stats()
     }
 
     pub fn sync_registry(&self, registry: UnitRegistry) {
-        // Implementation omitted for brevity
+        *self.index.borrow_mut() = RouterIndex::from_registry(&registry);
+        *self.registry.borrow_mut() = Some(Rc::new(registry));
     }
 
     pub fn plan(&self, event: &EventContext) -> RoutePlan {
         let classified = classify_event(event);
-        self.index.plan(classified)
+        self.index.borrow().plan(classified)
     }
 
     pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
-        let classified = classify_event(event);
         let plan = self.plan(event);
 
-        if let Some(moderation) = &self.moderation {
-            let invocations = select_unit_dispatches(
-                moderation
-                    .unit_registry
-                    .as_deref()
-                    .unwrap_or(&UnitRegistry::new()),
-                event,
-            );
-            let unit_policy = unit_policy_for_builtin_moderation(&invocations);
+        let registry_guard = self.registry.borrow();
+        let fallback_registry = UnitRegistry::new();
+        let registry = registry_guard
+            .as_deref()
+            .or(self
+                .moderation
+                .as_ref()
+                .and_then(|m| m.unit_registry.as_deref()))
+            .unwrap_or(&fallback_registry);
 
-            let result = moderation
-                .handle_event_with_unit_policy(event, unit_policy.as_ref())
-                .await
-                .map_err(|e| RoutingError::Moderation(e))?;
+        let invocations = select_unit_dispatches(registry, event);
 
-            return Ok(ExecutionOutcome::BuiltInModeration {
-                plan,
-                result,
-                deferred_invocations: invocations,
-            });
+        if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
+            if let Some(moderation) = &self.moderation {
+                let unit_policy = unit_policy_for_builtin_moderation(&invocations);
+
+                let result = moderation
+                    .handle_event_with_unit_policy(event, unit_policy.as_ref())
+                    .await
+                    .map_err(|e| RoutingError::Moderation(e))?;
+
+                return Ok(ExecutionOutcome::BuiltInModeration {
+                    plan,
+                    result,
+                    deferred_invocations: invocations,
+                });
+            }
+        }
+
+        if plan.lanes.contains(&ExecutionLane::UnitDispatch) {
+            return Ok(ExecutionOutcome::UnitDispatch { plan, invocations });
         }
 
         Ok(ExecutionOutcome::Unhandled(plan))
@@ -97,21 +119,25 @@ pub struct RouterIndex {
 
 impl RouterIndex {
     pub fn new() -> Self {
+        let mut command_index = HashMap::new();
+        for cmd in ["warn", "mute", "ban", "del", "undo", "msg"] {
+            command_index.insert(cmd.to_owned(), vec![ExecutionLane::BuiltInModeration]);
+        }
         Self {
-            command_index: HashMap::new(),
+            command_index,
             event_type_index: HashMap::new(),
         }
     }
 
     pub fn from_registry(registry: &UnitRegistry) -> Self {
-        let mut command_index = HashMap::new();
-        let mut event_type_index = HashMap::new();
+        let mut index = Self::new();
         for entry in registry.entries() {
             if let Some(manifest) = &entry.manifest {
                 match &manifest.trigger {
                     crate::unit::TriggerSpec::Command { commands } => {
                         for cmd in commands {
-                            command_index
+                            index
+                                .command_index
                                 .entry(cmd.to_lowercase())
                                 .or_insert_with(Vec::new)
                                 .push(ExecutionLane::UnitDispatch);
@@ -119,7 +145,8 @@ impl RouterIndex {
                     }
                     crate::unit::TriggerSpec::EventType { events } => {
                         for event_type in events {
-                            event_type_index
+                            index
+                                .event_type_index
                                 .entry(*event_type)
                                 .or_insert_with(Vec::new)
                                 .push(ExecutionLane::UnitDispatch);
@@ -131,10 +158,7 @@ impl RouterIndex {
                 }
             }
         }
-        Self {
-            command_index,
-            event_type_index,
-        }
+        index
     }
 
     pub fn stats(&self) -> RouterIndexStats {

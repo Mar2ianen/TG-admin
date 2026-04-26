@@ -1,5 +1,7 @@
 use super::ModerationEngine;
-use super::types::{CompensationRecipe, ExecutionTarget, ModerationError, ModerationExecution};
+use super::types::{
+    CompensationRecipe, ExecutionTarget, ModerationError, ModerationExecution, ModerationUnitPolicy,
+};
 use crate::event::EventContext;
 use crate::storage::UserPatch;
 use crate::tg::{
@@ -12,6 +14,7 @@ pub async fn execute_compensation(
     recipe: &CompensationRecipe,
     dry_run: bool,
     execution: &mut ModerationExecution,
+    unit_policy: Option<&ModerationUnitPolicy>,
 ) -> Result<ExecutionTarget, ModerationError> {
     match recipe {
         CompensationRecipe::WarnRevert {
@@ -56,7 +59,7 @@ pub async fn execute_compensation(
             user_id,
             reason,
         } => {
-            engine.require_capability(event, None, "tg.moderate.restrict")?;
+            engine.require_capability(event, unit_policy, "tg.moderate.restrict")?;
             let telegram = engine
                 .gateway
                 .execute_checked(
@@ -85,7 +88,7 @@ pub async fn execute_compensation(
             user_id,
             reason,
         } => {
-            engine.require_capability(event, None, "tg.moderate.ban")?;
+            engine.require_capability(event, unit_policy, "tg.moderate.ban")?;
             let telegram = engine
                 .gateway
                 .execute_checked(

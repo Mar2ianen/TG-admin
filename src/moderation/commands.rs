@@ -479,7 +479,9 @@ impl ModerationEngine {
             })?;
 
         let mut execution = ModerationExecution::new(dry_run);
-        let target = execute_compensation(self, event, &recipe, dry_run, &mut execution).await?;
+        let target =
+            execute_compensation(self, event, &recipe, dry_run, &mut execution, unit_policy)
+                .await?;
 
         let audit = self.build_audit_entry(
             event,

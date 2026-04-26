@@ -111,7 +111,7 @@ impl Runtime {
         let script_runner = ScriptRunner::new(config.paths.scripts_dir.clone());
         let router = Rc::new(
             ExecutionRouter::new()
-                .with_registry(self.registry.clone())
+                .with_registry_handle(registry_handle.clone())
                 .with_moderation(moderation)
                 .with_script_runner(script_runner, script_host_api),
         );

@@ -78,9 +78,7 @@ fn unit_event_type_for(update_type: UpdateType) -> Option<crate::unit::UnitEvent
         | UpdateType::EditedChannelPost => Some(crate::unit::UnitEventType::Message),
         UpdateType::CallbackQuery => Some(crate::unit::UnitEventType::CallbackQuery),
         UpdateType::Job => Some(crate::unit::UnitEventType::Job),
-        UpdateType::ChatMember
-        | UpdateType::MyChatMember
-        | UpdateType::JoinRequest
-        | UpdateType::System => None,
+        UpdateType::ChatMember => Some(crate::unit::UnitEventType::MemberJoined),
+        UpdateType::MyChatMember | UpdateType::JoinRequest | UpdateType::System => None,
     }
 }
