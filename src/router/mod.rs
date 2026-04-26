@@ -92,30 +92,44 @@ impl ExecutionRouter {
 #[derive(Debug, Clone)]
 pub struct RouterIndex {
     command_index: HashMap<String, Vec<ExecutionLane>>,
+    event_type_index: HashMap<crate::unit::UnitEventType, Vec<ExecutionLane>>,
 }
 
 impl RouterIndex {
     pub fn new() -> Self {
         Self {
             command_index: HashMap::new(),
+            event_type_index: HashMap::new(),
         }
     }
 
     pub fn from_registry(registry: &UnitRegistry) -> Self {
         let mut command_index = HashMap::new();
+        let mut event_type_index = HashMap::new();
         for entry in registry.entries() {
             if let Some(manifest) = &entry.manifest {
-                if let crate::unit::TriggerSpec::Command { commands } = &manifest.trigger {
-                    for cmd in commands {
-                        command_index
-                            .entry(cmd.to_lowercase())
+                match &manifest.trigger {
+                    crate::unit::TriggerSpec::Command { commands } => {
+                        for cmd in commands {
+                            command_index
+                                .entry(cmd.to_lowercase())
+                                .or_insert_with(Vec::new)
+                                .push(ExecutionLane::UnitDispatch);
+                        }
+                    }
+                    crate::unit::TriggerSpec::EventType { event_type } => {
+                        event_type_index
+                            .entry(*event_type)
                             .or_insert_with(Vec::new)
                             .push(ExecutionLane::UnitDispatch);
                     }
                 }
             }
         }
-        Self { command_index }
+        Self {
+            command_index,
+            event_type_index,
+        }
     }
 
     pub fn stats(&self) -> RouterIndexStats {
@@ -132,11 +146,28 @@ impl RouterIndex {
                 lanes.extend(mapped_lanes);
             }
         }
+
+        // Check for event type dispatch if unit exists
+        if let Some(event_type) = map_update_to_unit_event(classified.update_type) {
+            if let Some(mapped_lanes) = self.event_type_index.get(&event_type) {
+                lanes.extend(mapped_lanes);
+            }
+        }
+
         RoutePlan {
             classified,
             matched_buckets: Vec::new(),
             lanes,
         }
+    }
+}
+
+fn map_update_to_unit_event(
+    update_type: crate::event::UpdateType,
+) -> Option<crate::unit::UnitEventType> {
+    match update_type {
+        crate::event::UpdateType::ChatMember => Some(crate::unit::UnitEventType::MemberJoined),
+        _ => None,
     }
 }
 

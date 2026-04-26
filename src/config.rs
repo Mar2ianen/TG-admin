@@ -5,6 +5,28 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModerationPolicy {
+    pub delete_commands: bool,
+    pub delete_service_messages: bool,
+    pub enable_admin_menu: bool,
+    pub shadow_ban_enabled: bool,
+    pub warn_limit: i64,
+}
+
+impl Default for ModerationPolicy {
+    fn default() -> Self {
+        Self {
+            delete_commands: true,
+            delete_service_messages: true,
+            enable_admin_menu: true,
+            shadow_ban_enabled: true,
+            warn_limit: 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
@@ -18,14 +40,40 @@ pub struct AppConfig {
     pub scheduler: SchedulerConfig,
     pub observability: ObservabilityConfig,
     pub features: FeatureFlags,
+    pub moderation: ModerationPolicy,
 }
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        match env::var_os("TMO_CONFIG") {
+        let config = match env::var_os("TMO_CONFIG") {
             Some(path) => Self::load_required_from_path(Path::new(&path)),
             None => Self::load_from_path(Path::new("config.toml")),
+        }?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !self.paths.data_dir.exists() {
+            fs::create_dir_all(&self.paths.data_dir)
+                .with_context(|| format!("failed to create data_dir: {:?}", self.paths.data_dir))?;
         }
+
+        if !self.paths.units_dir.exists() {
+            return Err(anyhow::anyhow!(
+                "units_dir does not exist: {:?}",
+                self.paths.units_dir
+            ));
+        }
+
+        if let Some(token) = &self.telegram.bot_token {
+            if token.trim().is_empty() {
+                return Err(anyhow::anyhow!("telegram.bot_token is empty"));
+            }
+        }
+
+        self.runtime_storage_config()?;
+        Ok(())
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {

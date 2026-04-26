@@ -1,0 +1,13 @@
+[Unit]
+Name = "voice_processor"
+Enabled = true
+
+[Trigger]
+Type = "update_trait"
+Traits = ["voice"]
+
+[Service]
+ExecStart = "scripts/moderation/transcribe_and_fix.rhai"
+
+[Capabilities]
+Allow = ["ml.transcribe", "ml.chat"]

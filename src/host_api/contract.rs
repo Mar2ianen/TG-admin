@@ -34,7 +34,9 @@ pub enum HostApiRequest {
     MlHealth(MlHealthRequest),
     MlEmbedText(MlEmbedTextRequest),
     MlChatCompletions(MlChatCompletionsRequest),
+    MlTranscribe(MlTranscribeRequest),
     MlModels(MlModelsRequest),
+    TgSendMessage(TgSendMessageRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +59,9 @@ pub enum HostApiValue {
     MlHealth(MlHealthValue),
     MlEmbedText(MlEmbedTextValue),
     MlChatCompletions(MlChatCompletionsValue),
+    MlTranscribe(MlTranscribeValue),
     MlModels(MlModelsValue),
+    TgSendMessage(TgSendMessageValue),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -81,7 +85,20 @@ pub enum HostApiOperation {
     MlHealth,
     MlEmbedText,
     MlChatCompletions,
+    MlTranscribe,
     MlModels,
+    TgSendMessage,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TgSendMessageRequest {
+    pub chat_id: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TgSendMessageValue {
+    pub message_id: i32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -279,4 +296,18 @@ impl UnitStatusEntry {
             diagnostics: descriptor.diagnostics.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlTranscribeRequest {
+    pub base_url: Option<String>,
+    pub file_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlTranscribeValue {
+    pub base_url: Option<String>,
+    pub file_id: String,
+    pub text: Option<String>,
+    pub transport_ready: bool,
 }

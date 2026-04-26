@@ -12,6 +12,7 @@ mod db;
 mod error;
 mod history;
 mod ml;
+mod template;
 mod unit_status;
 mod validation;
 
@@ -26,9 +27,11 @@ pub use contract::{
 };
 pub use error::{HostApiError, HostApiErrorDetail, HostApiErrorKind};
 pub use ml::{
-    MlChatCompletionsRequest, MlChatCompletionsValue, MlChatMessage, MlEmbedTextRequest,
-    MlEmbedTextValue, MlHealthRequest, MlHealthValue, MlModelInfo, MlModelsRequest, MlModelsValue,
-    MlServerTransport,
+    MlChatCompletionsRequest, MlChatCompletionsValue, MlEmbedTextRequest, MlEmbedTextValue,
+    MlHealthRequest, MlHealthValue, MlModelInfo, MlModelsRequest, MlModelsValue, MlServerTransport,
+    MlTranscribeRequest, MlTranscribeValue,
+};
+
 };
 pub(crate) use validation::{
     apply_user_patch, execution_mode_label, required_capability, storage_error, to_rfc3339,
@@ -153,10 +156,44 @@ impl HostApi {
             HostApiRequest::MlChatCompletions(request) => self
                 .ml_chat_completions(event, request)
                 .map(|response| response.map(HostApiValue::MlChatCompletions)),
+            HostApiRequest::MlTranscribe(request) => self
+                .ml_transcribe(event, request)
+                .map(|response| response.map(HostApiValue::MlTranscribe)),
+            HostApiRequest::TgSendMessage(request) => self
+                .tg_send_message(event, request)
+                .map(|response| response.map(HostApiValue::TgSendMessage)),
             HostApiRequest::MlModels(request) => self
                 .ml_models(event, request)
                 .map(|response| response.map(HostApiValue::MlModels)),
         }
+    }
+
+    pub fn tg_send_message(
+        &self,
+        event: &EventContext,
+        request: TgSendMessageRequest,
+    ) -> Result<HostApiResponse<TgSendMessageValue>, HostApiError> {
+        self.require_operation_capability(event, HostApiOperation::TgSendMessage)?;
+
+        let result = futures::executor::block_on(self.gateway.execute_checked(
+            crate::tg::TelegramRequest::SendMessage(crate::tg::TelegramSendMessageRequest {
+                chat_id: request.chat_id,
+                text: request.text,
+                reply_to_message_id: None,
+                silent: false,
+                parse_mode: crate::tg::ParseMode::PlainText,
+                markup: None,
+            }),
+            crate::tg::TelegramExecutionOptions { dry_run: self.dry_run },
+        )).map_err(|e| HostApiError::internal(HostApiOperation::TgSendMessage, HostApiErrorDetail::InternalConversionFailure { message: e.to_string() }))?;
+
+        let message_id = if let crate::tg::TelegramResult::Message(m) = result {
+            m.message_id
+        } else {
+            0
+        };
+
+        Ok(self.response(HostApiOperation::TgSendMessage, TgSendMessageValue { message_id }))
     }
 
     fn storage(&self, operation: HostApiOperation) -> Result<&StorageConnection, HostApiError> {
@@ -281,6 +318,21 @@ impl HostApi {
         }
 
         Ok(())
+    }
+}
+
+    pub fn load_template(&self, name: &str) -> String {
+        let custom_path = std::path::Path::new("templates").join(format!("{}.txt", name));
+        if let Ok(content) = std::fs::read_to_string(&custom_path) {
+            return content;
+        }
+
+        let bundled_path = std::path::Path::new("bundled_templates").join(format!("{}.txt", name));
+        std::fs::read_to_string(bundled_path).unwrap_or_else(|_| format!("[Template {} not found]", name))
+    }
+
+    pub fn render_template(&self, template: &str, vars: std::collections::HashMap<String, String>) -> String {
+        crate::host_api::template::render_template(template, vars)
     }
 }
 

@@ -61,7 +61,7 @@ fn command_mute_with_flags_snapshot() {
 
     let actual = serde_json::to_string_pretty(&parsed).expect("should serialize");
 
-    println!("Actual output:\n{}", actual);
+    eprintln!("Actual output:\n{}", actual);
 }
 
 #[test]
@@ -104,7 +104,7 @@ AllowManualInvoke = true
 
     let actual = serde_json::to_string_pretty(&manifest).expect("should serialize");
 
-    println!("Unit manifest snapshot:\n{}", actual);
+    eprintln!("Unit manifest snapshot:\n{}", actual);
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn event_context_snapshot() {
 
     let actual = serde_json::to_string_pretty(&event).expect("should serialize");
 
-    println!("Event context snapshot:\n{}", actual);
+    eprintln!("Event context snapshot:\n{}", actual);
 }
 
 #[test]
@@ -193,5 +193,5 @@ fn dispatch_result_with_aliases_snapshot() {
 
     let actual = serde_json::to_string_pretty(&result).expect("should serialize");
 
-    println!("Dispatch result snapshot:\n{}", actual);
+    eprintln!("Dispatch result snapshot:\n{}", actual);
 }

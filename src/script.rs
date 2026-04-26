@@ -34,8 +34,10 @@ struct BridgeState {
 // SAFETY: BridgeState is only ever accessed on the thread that set it (via
 // thread_local!). BridgeGuard guarantees the pointers are cleared before
 // the referents are freed. The runtime is single-threaded (current_thread).
-unsafe impl Send for BridgeState {}
-unsafe impl Sync for BridgeState {}
+//
+// NOTE: This module requires a single-threaded tokio runtime (current_thread).
+// DO NOT use with tokio::runtime::Builder::new_multi_thread() or share BridgeState
+// across threads. A future refactor should eliminate raw pointers in favor of Arc/channels.
 
 thread_local! {
     static BRIDGE: RefCell<Option<BridgeState>> = const { RefCell::new(None) };
@@ -359,7 +361,85 @@ fn build_engine(max_ops: u64) -> Engine {
         },
     );
 
-    // --- ml.embed ---
+    // --- templates ---
+
+    engine.register_fn("load_template", |name: String| -> String {
+        with_bridge(|host_api, _| host_api.load_template(&name)).unwrap_or_default()
+    });
+
+    engine.register_fn("render_auto", |template_name: String| -> String {
+        with_bridge(|host_api, event| {
+            let template = host_api.load_template(&template_name);
+            let mut vars = std::collections::HashMap::new();
+
+            // Авто-переменные
+            if let Some(sender) = &event.sender {
+                vars.insert(
+                    "user_name".to_owned(),
+                    sender.display_name.clone().unwrap_or_default(),
+                );
+                vars.insert("user_id".to_owned(), sender.id.to_string());
+                vars.insert(
+                    "user_link".to_owned(),
+                    format!(
+                        "[{}](tg://user?id={})",
+                        sender.display_name.clone().unwrap_or_default(),
+                        sender.id
+                    ),
+                );
+            }
+            if let Some(chat) = &event.chat {
+                vars.insert(
+                    "chat_title".to_owned(),
+                    chat.title.clone().unwrap_or_default(),
+                );
+            }
+
+            // Cron/System-переменные
+            let now = chrono::Utc::now();
+            vars.insert("date".to_owned(), now.format("%Y-%m-%d").to_string());
+            vars.insert("time".to_owned(), now.format("%H:%M").to_string());
+
+            host_api.render_template(&template, vars)
+        })
+        .unwrap_or_default()
+    });
+
+    /// Transcribe a voice file.
+    ///
+    /// `base_url`: ML server base URL.
+    /// `file_id`: file identifier.
+    ///
+    /// Returns the transcript string, or empty string on error.
+    engine.register_fn(
+        "ml_transcribe",
+        |base_url: String, file_id: String| -> String {
+            with_bridge(|host_api, event| {
+                let req = HostApiRequest::MlTranscribe(MlTranscribeRequest {
+                    base_url: if base_url.is_empty() {
+                        None
+                    } else {
+                        Some(base_url)
+                    },
+                    file_id,
+                });
+                match host_api.call(event, req) {
+                    Ok(resp) => {
+                        if let HostApiValue::MlTranscribe(val) = resp.value {
+                            val.text.unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "script bridge: ml_transcribe failed");
+                        String::new()
+                    }
+                }
+            })
+            .unwrap_or_default()
+        },
+    );
 
     /// Embed a single text string using the ML server.
     ///

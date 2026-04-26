@@ -26,6 +26,17 @@ pub async fn execute_compensation(
                     .storage
                     .get_user(user_id)
                     .map_err(ModerationError::Storage)?;
+
+                // Hardening: Verify state consistency before revert
+                if let Some(user) = &current {
+                    if user.warn_count < *previous_warn_count {
+                        return Err(ModerationError::Validation(format!(
+                            "cannot revert to {} warns, user currently has {}",
+                            previous_warn_count, user.warn_count
+                        )));
+                    }
+                }
+
                 engine
                     .storage
                     .upsert_user(&UserPatch {

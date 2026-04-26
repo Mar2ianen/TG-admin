@@ -126,6 +126,19 @@ impl IngressPipeline {
             return Ok(result);
         }
 
+        // Shadowban check
+        if let Some(sender) = &event.sender {
+            if let Ok(Some(user)) = self.storage.get_user(sender.id) {
+                if user.shadowbanned {
+                    tracing::info!(
+                        user_id = sender.id,
+                        "dropping message from shadowbanned user"
+                    );
+                    return Ok(IngressProcessResult::Processed);
+                }
+            }
+        }
+
         self.append_message_journal(&event)?;
         self.router
             .route(&event)

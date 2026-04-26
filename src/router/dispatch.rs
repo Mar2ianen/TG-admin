@@ -16,7 +16,7 @@ pub fn select_unit_dispatches(
             let manifest = descriptor.manifest.as_ref()?;
             let trigger = match_trigger(&manifest.trigger, event)?;
 
-            println!("Matched unit {} with trigger {:?}", descriptor.id, trigger);
+            tracing::debug!(unit_id = %descriptor.id, trigger = ?trigger, "Matched unit with trigger");
 
             Some(UnitDispatchInvocation {
                 unit_id: descriptor.id.clone(),

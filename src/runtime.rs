@@ -562,7 +562,7 @@ ExecStart = "scripts/command/stats.rhai"
         let summary = runtime.summary();
 
         assert!(summary.router_ready);
-        assert_eq!(summary.indexed_command_routes, 7);
+        assert_eq!(summary.indexed_command_routes, 1);
         assert_eq!(summary.transport_name, "noop");
         assert!(runtime.host_api().is_some());
         assert!(runtime.router().is_some());

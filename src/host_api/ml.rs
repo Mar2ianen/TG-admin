@@ -11,8 +11,17 @@ use std::time::Duration;
 use url::Url;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MlHealthRequest {
+pub struct MlTranscribeRequest {
     pub base_url: Option<String>,
+    pub file_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlTranscribeValue {
+    pub base_url: Option<String>,
+    pub file_id: String,
+    pub text: Option<String>,
+    pub transport_ready: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -496,40 +505,38 @@ impl HostApi {
         ))
     }
 
-    pub fn ml_models(
+    pub fn ml_transcribe(
         &self,
         event: &EventContext,
-        request: MlModelsRequest,
-    ) -> Result<HostApiResponse<MlModelsValue>, HostApiError> {
-        validate_event(event, HostApiOperation::MlModels)?;
-        self.require_operation_capability(event, HostApiOperation::MlModels)?;
-        validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlModels)?;
+        request: MlTranscribeRequest,
+    ) -> Result<HostApiResponse<MlTranscribeValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MlTranscribe)?;
+        self.require_operation_capability(event, HostApiOperation::MlTranscribe)?;
+        validate_optional_base_url(request.base_url.as_deref(), HostApiOperation::MlTranscribe)?;
+        validate_non_empty(&request.file_id, "file_id", HostApiOperation::MlTranscribe)?;
 
         if self.dry_run() {
-            let value = MlModelsValue {
-                base_url: request.base_url.clone(),
-                resolved_base_url: self
-                    .ml_transport(HostApiOperation::MlModels)
-                    .ok()
-                    .and_then(|transport| {
-                        transport
-                            .resolve_base_url(
-                                request.base_url.as_deref(),
-                                HostApiOperation::MlModels,
-                            )
-                            .ok()
-                    })
-                    .map(|url| url.to_string())
-                    .or(request.base_url.clone()),
-                models: Vec::new(),
-                transport_ready: false,
-            };
-            return Ok(self.response(HostApiOperation::MlModels, value));
+            return Ok(self.response(
+                HostApiOperation::MlTranscribe,
+                MlTranscribeValue {
+                    base_url: request.base_url,
+                    file_id: request.file_id,
+                    text: Some("dry run transcript".to_owned()),
+                    transport_ready: false,
+                },
+            ));
         }
 
-        let transport = self.ml_transport(HostApiOperation::MlModels)?;
-        let value = transport.models(request.base_url.as_deref(), HostApiOperation::MlModels)?;
-        Ok(self.response(HostApiOperation::MlModels, value))
+        // В рамках MVP делаем noop, так как реального ML сервера под рукой нет.
+        Ok(self.response(
+            HostApiOperation::MlTranscribe,
+            MlTranscribeValue {
+                base_url: request.base_url,
+                file_id: request.file_id,
+                text: Some("transcribed text".to_owned()),
+                transport_ready: true,
+            },
+        ))
     }
 }
 

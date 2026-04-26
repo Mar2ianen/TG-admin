@@ -172,6 +172,51 @@ impl ModerationEngine {
         Ok(())
     }
 
+    pub async fn send_admin_menu(
+        &self,
+        chat_id: i64,
+        target_user_id: i64,
+        message_id: i32,
+    ) -> Result<(), ModerationError> {
+        let markup = crate::tg::TelegramUiMarkup {
+            inline_keyboard: vec![vec![
+                crate::tg::TelegramUiButton {
+                    text: "Warn".to_owned(),
+                    callback_data: Some(format!("warn:{}", target_user_id)),
+                    url: None,
+                },
+                crate::tg::TelegramUiButton {
+                    text: "Mute".to_owned(),
+                    callback_data: Some(format!("mute:{}", target_user_id)),
+                    url: None,
+                },
+                crate::tg::TelegramUiButton {
+                    text: "Ban".to_owned(),
+                    callback_data: Some(format!("ban:{}", target_user_id)),
+                    url: None,
+                },
+            ]],
+        };
+
+        self.gateway
+            .execute_checked(
+                crate::tg::TelegramRequest::SendMessage(crate::tg::TelegramSendMessageRequest {
+                    chat_id,
+                    text: format!("Admin actions for user {}", target_user_id),
+                    reply_to_message_id: Some(message_id),
+                    silent: true,
+                    parse_mode: crate::tg::ParseMode::PlainText,
+                    markup: Some(markup),
+                }),
+                crate::tg::TelegramExecutionOptions {
+                    dry_run: self.dry_run,
+                },
+            )
+            .await
+            .map_err(ModerationError::Telegram)?;
+        Ok(())
+    }
+
     pub(crate) fn require_capability(
         &self,
         event: &EventContext,
@@ -182,7 +227,7 @@ impl ModerationEngine {
             .map(|policy| &policy.unit)
             .or(event.system.unit.as_ref());
 
-        println!("Checking capability {} for unit {:?}", capability, unit);
+        tracing::debug!(capability = %capability, unit = ?unit, "Checking capability for unit");
 
         let unit = unit.ok_or_else(|| ModerationError::CapabilityDenied {
             capability: capability.to_owned(),
