@@ -321,37 +321,17 @@ fn build_engine(max_ops: u64) -> Engine {
     engine.register_fn("render_auto", |template_name: String| -> String {
         with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let template = host_api.load_template(&template_name);
-            let mut vars = std::collections::HashMap::new();
+            let mut ctx = crate::host_api::template::TemplateContext::new();
 
-            // Авто-переменные
             if let Some(sender) = &event.sender {
-                vars.insert(
-                    "user_name".to_owned(),
-                    sender.display_name.clone().unwrap_or_default(),
-                );
-                vars.insert("user_id".to_owned(), sender.id.to_string());
-                vars.insert(
-                    "user_link".to_owned(),
-                    format!(
-                        "[{}](tg://user?id={})",
-                        sender.display_name.clone().unwrap_or_default(),
-                        sender.id
-                    ),
-                );
+                ctx = ctx.with_user(sender);
             }
             if let Some(chat) = &event.chat {
-                vars.insert(
-                    "chat_title".to_owned(),
-                    chat.title.clone().unwrap_or_default(),
-                );
+                ctx = ctx.with_chat(chat);
             }
+            ctx = ctx.with_cron_metadata();
 
-            // Cron/System-переменные
-            let now = chrono::Utc::now();
-            vars.insert("date".to_owned(), now.format("%Y-%m-%d").to_string());
-            vars.insert("time".to_owned(), now.format("%H:%M").to_string());
-
-            host_api.render_template(&template, vars)
+            host_api.render_template(&template, ctx.into_map())
         })
         .unwrap_or_default()
     });
