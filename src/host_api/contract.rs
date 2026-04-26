@@ -35,6 +35,8 @@ pub enum HostApiRequest {
     MlEmbedText(MlEmbedTextRequest),
     MlChatCompletions(MlChatCompletionsRequest),
     MlModels(MlModelsRequest),
+    MlTranscribe(MlTranscribeRequest),
+    TgSendMessage(TgSendMessageRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +60,8 @@ pub enum HostApiValue {
     MlEmbedText(MlEmbedTextValue),
     MlChatCompletions(MlChatCompletionsValue),
     MlModels(MlModelsValue),
+    MlTranscribe(MlTranscribeValue),
+    TgSendMessage(TgSendMessageValue),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -82,10 +86,12 @@ pub enum HostApiOperation {
     MlEmbedText,
     MlChatCompletions,
     MlModels,
+    MlTranscribe,
+    TgSendMessage,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HostApiResponse<T> {
+pub(crate) struct HostApiResponse<T> {
     pub operation: HostApiOperation,
     pub dry_run: bool,
     pub value: T,
@@ -102,39 +108,39 @@ impl<T> HostApiResponse<T> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CtxCurrentValue {
+pub(crate) struct CtxCurrentValue {
     pub event: EventContext,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CtxResolveTargetRequest {
+pub(crate) struct CtxResolveTargetRequest {
     pub positional: Option<String>,
     pub selector_flag: Option<String>,
     pub implicit: Option<ParsedTargetSelector>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CtxParseDurationRequest {
+pub(crate) struct CtxParseDurationRequest {
     pub input: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CtxExpandReasonRequest {
+pub(crate) struct CtxExpandReasonRequest {
     pub reason: ReasonExpr,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbUserGetRequest {
+pub(crate) struct DbUserGetRequest {
     pub user_id: i64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbUserPatchRequest {
+pub(crate) struct DbUserPatchRequest {
     pub patch: UserPatch,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbUserIncrRequest {
+pub(crate) struct DbUserIncrRequest {
     pub user_id: i64,
     pub username: Option<String>,
     pub display_name: Option<String>,
@@ -147,19 +153,19 @@ pub struct DbUserIncrRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbKvGetRequest {
+pub(crate) struct DbKvGetRequest {
     pub scope_kind: String,
     pub scope_id: String,
     pub key: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbKvSetRequest {
+pub(crate) struct DbKvSetRequest {
     pub entry: KvEntry,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MsgWindowRequest {
+pub(crate) struct MsgWindowRequest {
     pub chat_id: i64,
     pub anchor_message_id: i64,
     pub up: usize,
@@ -168,7 +174,7 @@ pub struct MsgWindowRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MsgByUserRequest {
+pub(crate) struct MsgByUserRequest {
     pub chat_id: i64,
     pub user_id: i64,
     pub since: String,
@@ -176,7 +182,7 @@ pub struct MsgByUserRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct JobScheduleAfterRequest {
+pub(crate) struct JobScheduleAfterRequest {
     pub delay: String,
     pub executor_unit: String,
     pub payload: Value,
@@ -186,81 +192,81 @@ pub struct JobScheduleAfterRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AuditFindRequest {
+pub(crate) struct AuditFindRequest {
     pub filters: AuditLogFilter,
     pub limit: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AuditCompensateRequest {
+pub(crate) struct AuditCompensateRequest {
     pub action_id: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UnitStatusRequest {
+pub(crate) struct UnitStatusRequest {
     pub unit_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbUserGetValue {
+pub(crate) struct DbUserGetValue {
     pub user: Option<UserRecord>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbUserPatchValue {
+pub(crate) struct DbUserPatchValue {
     pub user: UserRecord,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbUserIncrValue {
+pub(crate) struct DbUserIncrValue {
     pub user: UserRecord,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbKvGetValue {
+pub(crate) struct DbKvGetValue {
     pub entry: Option<KvEntry>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct DbKvSetValue {
+pub(crate) struct DbKvSetValue {
     pub entry: KvEntry,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MsgWindowValue {
+pub(crate) struct MsgWindowValue {
     pub messages: Vec<MessageJournalRecord>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MsgByUserValue {
+pub(crate) struct MsgByUserValue {
     pub messages: Vec<MessageJournalRecord>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct JobScheduleAfterValue {
+pub(crate) struct JobScheduleAfterValue {
     pub job: JobRecord,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AuditFindValue {
+pub(crate) struct AuditFindValue {
     pub entries: Vec<AuditLogEntry>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AuditCompensateValue {
+pub(crate) struct AuditCompensateValue {
     pub compensated: bool,
     pub new_action_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UnitStatusValue {
+pub(crate) struct UnitStatusValue {
     pub requested_unit_id: Option<String>,
     pub summary: UnitRegistryStatus,
     pub unit: Option<UnitStatusEntry>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub struct UnitStatusEntry {
+pub(crate) struct UnitStatusEntry {
     pub unit_id: String,
     pub status: UnitStatus,
     pub enabled: Option<bool>,
@@ -279,4 +285,29 @@ impl UnitStatusEntry {
             diagnostics: descriptor.diagnostics.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlTranscribeRequest {
+    pub base_url: Option<String>,
+    pub file_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MlTranscribeValue {
+    pub base_url: Option<String>,
+    pub file_id: String,
+    pub text: Option<String>,
+    pub transport_ready: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TgSendMessageRequest {
+    pub chat_id: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TgSendMessageValue {
+    pub message_id: i32,
 }

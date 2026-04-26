@@ -34,10 +34,25 @@ impl EventCommandDispatcher {
             });
         };
 
-        let (source_kind, raw_source) = match source {
+        let (source_kind, mut raw_source) = match source {
             CommandSource::MessageText(text) => (CommandSourceKind::MessageText, text.trim()),
             CommandSource::CallbackData(data) => (CommandSourceKind::CallbackData, data.trim()),
         };
+
+        let mut synthetic_command = None;
+        if matches!(source_kind, CommandSourceKind::CallbackData) {
+            if let Some(user_id) = raw_source.strip_prefix("warn:") {
+                synthetic_command = Some(format!("/warn -user {}", user_id));
+            } else if let Some(user_id) = raw_source.strip_prefix("mute:") {
+                synthetic_command = Some(format!("/mute -user {} 1h", user_id)); // Default 1h for menu
+            } else if let Some(user_id) = raw_source.strip_prefix("ban:") {
+                synthetic_command = Some(format!("/ban -user {}", user_id));
+            }
+        }
+
+        if let Some(ref cmd) = synthetic_command {
+            raw_source = cmd.as_str();
+        }
 
         if raw_source.is_empty() {
             return CommandDispatchResult::Skipped(CommandDispatchSkip {

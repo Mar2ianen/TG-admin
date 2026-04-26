@@ -11,11 +11,14 @@
 //! the thread-local is cleared before the references become invalid.
 
 use crate::event::EventContext;
-use crate::host_api::MlChatMessage;
-use crate::host_api::{DbKvGetRequest, DbKvSetRequest, DbUserGetRequest, HostApiRequest};
-use crate::host_api::{HostApi, HostApiValue};
-use crate::host_api::{
-    MlChatCompletionsRequest, MlEmbedTextRequest, MlHealthRequest, MlModelsRequest,
+
+use crate::host_api::HostApi;
+use crate::host_api::contract::HostApiValue;
+use crate::host_api::contract::{
+    DbKvGetRequest, DbKvSetRequest, DbUserGetRequest, HostApiRequest, MlTranscribeRequest,
+};
+use crate::host_api::ml::{
+    MlChatCompletionsRequest, MlChatMessage, MlEmbedTextRequest, MlHealthRequest, MlModelsRequest,
 };
 use crate::storage::KvEntry;
 use rhai::{Dynamic, Engine, Scope};
@@ -177,7 +180,7 @@ fn build_engine(max_ops: u64) -> Engine {
     engine.register_fn(
         "db_kv_get",
         |scope_kind: String, scope_id: String, key: String| -> String {
-            with_bridge(|host_api, event| {
+            with_bridge(|host_api: &crate::host_api::HostApi, event| {
                 let req = HostApiRequest::DbKvGet(DbKvGetRequest {
                     scope_kind,
                     scope_id,
@@ -205,7 +208,7 @@ fn build_engine(max_ops: u64) -> Engine {
     engine.register_fn(
         "db_kv_set",
         |scope_kind: String, scope_id: String, key: String, value_json: String| -> bool {
-            with_bridge(|host_api, event| {
+            with_bridge(|host_api: &crate::host_api::HostApi, event| {
                 let entry = KvEntry {
                     scope_kind,
                     scope_id,
@@ -230,7 +233,7 @@ fn build_engine(max_ops: u64) -> Engine {
 
     // Get a user record as a JSON string, or empty string if not found.
     engine.register_fn("db_user_get_json", |user_id: i64| -> String {
-        with_bridge(|host_api, event| {
+        with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::DbUserGet(DbUserGetRequest { user_id });
             match host_api.call(event, req) {
                 Ok(resp) => {
@@ -266,7 +269,7 @@ fn build_engine(max_ops: u64) -> Engine {
     /// Check ML server health. `base_url` can be empty string to use the configured default.
     /// Returns JSON string of MlHealthValue, or empty string on error.
     engine.register_fn("ml_health_json", |base_url: String| -> String {
-        with_bridge(|host_api, event| {
+        with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::MlHealth(MlHealthRequest {
                 base_url: if base_url.is_empty() {
                     None
@@ -289,7 +292,7 @@ fn build_engine(max_ops: u64) -> Engine {
 
     /// List available ML models. Returns JSON string of MlModelsValue.
     engine.register_fn("ml_models_json", |base_url: String| -> String {
-        with_bridge(|host_api, event| {
+        with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::MlModels(MlModelsRequest {
                 base_url: if base_url.is_empty() {
                     None
@@ -308,6 +311,87 @@ fn build_engine(max_ops: u64) -> Engine {
         .unwrap_or_default()
     });
 
+    // --- templates ---
+
+    engine.register_fn("load_template", |name: String| -> String {
+        with_bridge(|host_api: &crate::host_api::HostApi, _| host_api.load_template(&name))
+            .unwrap_or_default()
+    });
+
+    engine.register_fn("render_auto", |template_name: String| -> String {
+        with_bridge(|host_api: &crate::host_api::HostApi, event| {
+            let template = host_api.load_template(&template_name);
+            let mut vars = std::collections::HashMap::new();
+
+            // Авто-переменные
+            if let Some(sender) = &event.sender {
+                vars.insert(
+                    "user_name".to_owned(),
+                    sender.display_name.clone().unwrap_or_default(),
+                );
+                vars.insert("user_id".to_owned(), sender.id.to_string());
+                vars.insert(
+                    "user_link".to_owned(),
+                    format!(
+                        "[{}](tg://user?id={})",
+                        sender.display_name.clone().unwrap_or_default(),
+                        sender.id
+                    ),
+                );
+            }
+            if let Some(chat) = &event.chat {
+                vars.insert(
+                    "chat_title".to_owned(),
+                    chat.title.clone().unwrap_or_default(),
+                );
+            }
+
+            // Cron/System-переменные
+            let now = chrono::Utc::now();
+            vars.insert("date".to_owned(), now.format("%Y-%m-%d").to_string());
+            vars.insert("time".to_owned(), now.format("%H:%M").to_string());
+
+            host_api.render_template(&template, vars)
+        })
+        .unwrap_or_default()
+    });
+
+    /// Transcribe a voice file.
+    ///
+    /// `base_url`: ML server base URL.
+    /// `file_id`: file identifier.
+    ///
+    /// Returns the transcript string, or empty string on error.
+    engine.register_fn(
+        "ml_transcribe",
+        |base_url: String, file_id: String| -> String {
+            with_bridge(|host_api: &crate::host_api::HostApi, event| {
+                let req = HostApiRequest::MlTranscribe(MlTranscribeRequest {
+                    base_url: if base_url.is_empty() {
+                        None
+                    } else {
+                        Some(base_url)
+                    },
+                    file_id,
+                });
+                match host_api.call(event, req) {
+                    Ok(resp) => {
+                        if let HostApiValue::MlTranscribe(val) = resp.value {
+                            val.text.unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "script bridge: ml_transcribe failed");
+                        String::new()
+                    }
+                }
+            })
+            .unwrap_or_default()
+        },
+    );
+
     // --- ml.chat ---
 
     /// Send a chat completion request to the ML server.
@@ -319,7 +403,7 @@ fn build_engine(max_ops: u64) -> Engine {
     engine.register_fn(
         "ml_chat",
         |model: String, messages: rhai::Array| -> String {
-            with_bridge(|host_api, event| {
+            with_bridge(|host_api: &crate::host_api::HostApi, event| {
                 let messages: Vec<MlChatMessage> = messages
                     .into_iter()
                     .filter_map(|item| {
@@ -368,7 +452,7 @@ fn build_engine(max_ops: u64) -> Engine {
     ///
     /// Returns the embedding as a Rhai array of floats, or an empty array on error.
     engine.register_fn("ml_embed", |model: String, text: String| -> rhai::Array {
-        with_bridge(|host_api, event| {
+        with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::MlEmbedText(MlEmbedTextRequest {
                 base_url: None,
                 model: if model.is_empty() { None } else { Some(model) },

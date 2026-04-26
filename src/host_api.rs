@@ -1,35 +1,27 @@
 use std::rc::Rc;
 
 use crate::event::EventContext;
+use crate::host_api::contract::*;
 use crate::parser::reason::ReasonAliasRegistry;
 use crate::storage::StorageConnection;
+use crate::tg::{TelegramExecutionOptions, TelegramGateway, TelegramRequest, TelegramResult};
 use crate::unit::UnitRegistry;
 
-mod audit;
-mod contract;
-mod ctx;
-mod db;
-mod error;
-mod history;
-mod ml;
-mod unit_status;
-mod validation;
+pub mod audit;
+pub mod contract;
+pub mod ctx;
+pub mod db;
+pub mod error;
+pub mod history;
+pub mod ml;
+pub mod template;
+pub mod unit_status;
+pub mod validation;
 
-pub use contract::{
-    AuditCompensateRequest, AuditCompensateValue, AuditFindRequest, AuditFindValue,
-    CtxCurrentValue, CtxExpandReasonRequest, CtxParseDurationRequest, CtxResolveTargetRequest,
-    DbKvGetRequest, DbKvGetValue, DbKvSetRequest, DbKvSetValue, DbUserGetRequest, DbUserGetValue,
-    DbUserIncrRequest, DbUserIncrValue, DbUserPatchRequest, DbUserPatchValue, HostApiOperation,
-    HostApiRequest, HostApiResponse, HostApiValue, JobScheduleAfterRequest, JobScheduleAfterValue,
-    MsgByUserRequest, MsgByUserValue, MsgWindowRequest, MsgWindowValue, UnitStatusEntry,
-    UnitStatusRequest, UnitStatusValue,
-};
+pub use contract::HostApiOperation;
+pub use contract::*;
 pub use error::{HostApiError, HostApiErrorDetail, HostApiErrorKind};
-pub use ml::{
-    MlChatCompletionsRequest, MlChatCompletionsValue, MlChatMessage, MlEmbedTextRequest,
-    MlEmbedTextValue, MlHealthRequest, MlHealthValue, MlModelInfo, MlModelsRequest, MlModelsValue,
-    MlServerTransport,
-};
+pub use ml::MlServerTransport;
 pub(crate) use validation::{
     apply_user_patch, execution_mode_label, required_capability, storage_error, to_rfc3339,
     user_patch_from_increment, validate_event, validate_kv_entry, validate_kv_key,
@@ -46,6 +38,7 @@ pub struct HostApi {
     unit_registry: Option<Rc<UnitRegistry>>,
     aliases: ReasonAliasRegistry,
     ml_transport: Option<MlServerTransport>,
+    gateway: TelegramGateway,
 }
 
 impl HostApi {
@@ -56,6 +49,7 @@ impl HostApi {
             unit_registry: None,
             aliases: ReasonAliasRegistry::new(),
             ml_transport: None,
+            gateway: TelegramGateway::new(false),
         }
     }
 
@@ -153,10 +147,77 @@ impl HostApi {
             HostApiRequest::MlChatCompletions(request) => self
                 .ml_chat_completions(event, request)
                 .map(|response| response.map(HostApiValue::MlChatCompletions)),
+            HostApiRequest::MlTranscribe(request) => self
+                .ml_transcribe(event, request)
+                .map(|response| response.map(HostApiValue::MlTranscribe)),
             HostApiRequest::MlModels(request) => self
                 .ml_models(event, request)
                 .map(|response| response.map(HostApiValue::MlModels)),
+            HostApiRequest::TgSendMessage(request) => self
+                .tg_send_message(event, request)
+                .map(|response| response.map(HostApiValue::TgSendMessage)),
         }
+    }
+
+    pub fn tg_send_message(
+        &self,
+        event: &EventContext,
+        request: TgSendMessageRequest,
+    ) -> Result<HostApiResponse<TgSendMessageValue>, HostApiError> {
+        self.require_operation_capability(event, HostApiOperation::TgSendMessage)?;
+
+        let result = futures::executor::block_on(self.gateway.execute_checked(
+            crate::tg::TelegramRequest::SendMessage(crate::tg::TelegramSendMessageRequest {
+                chat_id: request.chat_id,
+                text: request.text,
+                reply_to_message_id: None,
+                silent: false,
+                parse_mode: crate::tg::ParseMode::PlainText,
+                markup: None,
+            }),
+            TelegramExecutionOptions {
+                dry_run: self.dry_run,
+            },
+        ))
+        .map_err(|e| {
+            HostApiError::internal(
+                HostApiOperation::TgSendMessage,
+                HostApiErrorDetail::InternalConversionFailure {
+                    message: e.to_string(),
+                },
+            )
+        })?;
+
+        let message_id = if let TelegramResult::Message(m) = result.result {
+            m.message_id
+        } else {
+            0
+        };
+
+        Ok(self.response(
+            HostApiOperation::TgSendMessage,
+            TgSendMessageValue { message_id },
+        ))
+    }
+
+    pub fn ml_transcribe(
+        &self,
+        event: &EventContext,
+        request: MlTranscribeRequest,
+    ) -> Result<HostApiResponse<MlTranscribeValue>, HostApiError> {
+        validate_event(event, HostApiOperation::MlTranscribe)?;
+        self.require_operation_capability(event, HostApiOperation::MlTranscribe)?;
+        validate_non_empty(&request.file_id, "file_id", HostApiOperation::MlTranscribe)?;
+
+        Ok(self.response(
+            HostApiOperation::MlTranscribe,
+            MlTranscribeValue {
+                base_url: request.base_url,
+                file_id: request.file_id,
+                text: Some("transcribed text".to_owned()),
+                transport_ready: true,
+            },
+        ))
     }
 
     fn storage(&self, operation: HostApiOperation) -> Result<&StorageConnection, HostApiError> {
@@ -208,7 +269,7 @@ impl HostApi {
         event: &EventContext,
         operation: HostApiOperation,
     ) -> Result<(), HostApiError> {
-        if let Some(capability) = required_capability(operation) {
+        if let Some(capability) = crate::host_api::validation::required_capability(operation) {
             self.require_capability(event, operation, capability)?;
         }
 
@@ -281,6 +342,25 @@ impl HostApi {
         }
 
         Ok(())
+    }
+
+    pub fn load_template(&self, name: &str) -> String {
+        let custom_path = std::path::Path::new("templates").join(format!("{}.txt", name));
+        if let Ok(content) = std::fs::read_to_string(&custom_path) {
+            return content;
+        }
+
+        let bundled_path = std::path::Path::new("bundled_templates").join(format!("{}.txt", name));
+        std::fs::read_to_string(bundled_path)
+            .unwrap_or_else(|_| format!("[Template {} not found]", name))
+    }
+
+    pub fn render_template(
+        &self,
+        template: &str,
+        vars: std::collections::HashMap<String, String>,
+    ) -> String {
+        crate::host_api::template::render_template(template, vars)
     }
 }
 

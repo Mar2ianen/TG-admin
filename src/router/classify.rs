@@ -148,18 +148,38 @@ pub(crate) fn extract_command_name(event: &EventContext) -> Option<String> {
 }
 
 fn parse_command_name(raw: &str) -> Option<String> {
-    let command = raw.trim().strip_prefix('/')?;
-    let token = command.split_whitespace().next()?;
-    let command_name = token.split('@').next().unwrap_or(token);
-    if command_name.is_empty()
-        || !command_name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
-        return None;
+    let raw = raw.trim();
+    if let Some(command) = raw.strip_prefix('/') {
+        let token = command.split_whitespace().next()?;
+        let command_name = token.split('@').next().unwrap_or(token);
+        if command_name.is_empty()
+            || !command_name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return None;
+        }
+        return Some(command_name.to_ascii_lowercase());
     }
 
-    Some(command_name.to_ascii_lowercase())
+    // Обработка префиксов callback data
+    if let Some(rest) = raw.strip_prefix("warn:") {
+        if rest.chars().all(|c| c.is_ascii_digit()) {
+            return Some("warn".to_owned());
+        }
+    }
+    if let Some(rest) = raw.strip_prefix("mute:") {
+        if rest.chars().all(|c| c.is_ascii_digit()) {
+            return Some("mute".to_owned());
+        }
+    }
+    if let Some(rest) = raw.strip_prefix("ban:") {
+        if rest.chars().all(|c| c.is_ascii_digit()) {
+            return Some("ban".to_owned());
+        }
+    }
+
+    None
 }
 
 fn push_unique<T>(items: &mut Vec<T>, item: T)

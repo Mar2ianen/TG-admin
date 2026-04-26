@@ -32,6 +32,7 @@ pub(crate) fn required_capability(operation: HostApiOperation) -> Option<&'stati
         | HostApiOperation::DbKvGet
         | HostApiOperation::DbKvSet
         | HostApiOperation::UnitStatus => None,
+        HostApiOperation::MlTranscribe | HostApiOperation::TgSendMessage => None,
     }
 }
 
