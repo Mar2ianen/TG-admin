@@ -1,1 +1,7 @@
 /target/
+
+# Data and Exports
+result.json
+Json test/
+*.sqlite3*
+.env

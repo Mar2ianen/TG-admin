@@ -172,7 +172,10 @@ fn map_update_to_unit_event(
     update_type: crate::event::UpdateType,
 ) -> Option<crate::unit::UnitEventType> {
     match update_type {
+        crate::event::UpdateType::Message => Some(crate::unit::UnitEventType::Message),
+        crate::event::UpdateType::CallbackQuery => Some(crate::unit::UnitEventType::CallbackQuery),
         crate::event::UpdateType::ChatMember => Some(crate::unit::UnitEventType::MemberJoined),
+        crate::event::UpdateType::Job => Some(crate::unit::UnitEventType::Job),
         _ => None,
     }
 }

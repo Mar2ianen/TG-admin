@@ -535,5 +535,7 @@ fn update_type_name(update_type: UpdateType) -> &'static str {
     }
 }
 
+pub mod json_export;
+
 #[cfg(test)]
-mod tests;
+pub mod tests;

@@ -1,0 +1,1 @@
+Привет, {user_link}! Добро пожаловать в {chat_title}. Сегодня {date} {time}.
