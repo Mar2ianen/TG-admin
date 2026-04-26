@@ -63,6 +63,23 @@ pub fn predict_result(request: &TelegramRequest) -> TelegramResult {
             delete_history: false,
             changed: true,
         }),
+        TelegramRequest::GetChatAdministrators(request) => {
+            TelegramResult::ChatAdministrators(TelegramChatAdministratorsResult {
+                chat_id: request.chat_id,
+                administrators: Vec::new(),
+            })
+        }
+        TelegramRequest::GetChatMember(request) => {
+            TelegramResult::ChatMember(TelegramChatMemberResult {
+                chat_id: request.chat_id,
+                user_id: request.user_id,
+                member: TelegramChatMember {
+                    user_id: request.user_id,
+                    is_admin: false,
+                    can_restrict_members: None,
+                },
+            })
+        }
         TelegramRequest::AnswerCallback(request) => {
             TelegramResult::Callback(TelegramCallbackResult {
                 callback_query_id: request.callback_query_id.clone(),

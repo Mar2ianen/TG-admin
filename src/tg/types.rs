@@ -72,6 +72,10 @@ pub enum TelegramRequest {
     Ban(TelegramBanRequest),
     #[serde(rename = "tg.unban")]
     Unban(TelegramUnbanRequest),
+    #[serde(rename = "tg.get_chat_administrators")]
+    GetChatAdministrators(TelegramGetChatAdministratorsRequest),
+    #[serde(rename = "tg.get_chat_member")]
+    GetChatMember(TelegramGetChatMemberRequest),
     #[serde(rename = "tg.answer_callback")]
     AnswerCallback(TelegramAnswerCallbackRequest),
 }
@@ -88,6 +92,8 @@ impl TelegramRequest {
             Self::Unrestrict(_) => TelegramOperation::Unrestrict,
             Self::Ban(_) => TelegramOperation::Ban,
             Self::Unban(_) => TelegramOperation::Unban,
+            Self::GetChatAdministrators(_) => TelegramOperation::GetChatAdministrators,
+            Self::GetChatMember(_) => TelegramOperation::GetChatMember,
             Self::AnswerCallback(_) => TelegramOperation::AnswerCallback,
         }
     }
@@ -100,9 +106,12 @@ impl TelegramRequest {
             Self::Unrestrict(request) => request.idempotency_key.as_deref(),
             Self::Ban(request) => request.idempotency_key.as_deref(),
             Self::Unban(request) => request.idempotency_key.as_deref(),
-            Self::SendUi(_) | Self::SendMessage(_) | Self::EditUi(_) | Self::AnswerCallback(_) => {
-                None
-            }
+            Self::SendUi(_)
+            | Self::SendMessage(_)
+            | Self::EditUi(_)
+            | Self::GetChatAdministrators(_)
+            | Self::GetChatMember(_)
+            | Self::AnswerCallback(_) => None,
         }
     }
 }
@@ -118,6 +127,8 @@ pub enum TelegramOperation {
     Unrestrict,
     Ban,
     Unban,
+    GetChatAdministrators,
+    GetChatMember,
     AnswerCallback,
 }
 
@@ -133,6 +144,8 @@ impl TelegramOperation {
             Self::Unrestrict => "tg.unrestrict",
             Self::Ban => "tg.ban",
             Self::Unban => "tg.unban",
+            Self::GetChatAdministrators => "tg.get_chat_administrators",
+            Self::GetChatMember => "tg.get_chat_member",
             Self::AnswerCallback => "tg.answer_callback",
         }
     }
@@ -251,6 +264,17 @@ pub struct TelegramUnbanRequest {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramGetChatAdministratorsRequest {
+    pub chat_id: ChatId,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramGetChatMemberRequest {
+    pub chat_id: ChatId,
+    pub user_id: UserId,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TelegramAnswerCallbackRequest {
     pub callback_query_id: String,
     pub text: Option<String>,
@@ -269,6 +293,8 @@ pub enum TelegramResult {
     Delete(TelegramDeleteResult),
     Restriction(TelegramRestrictionResult),
     Ban(TelegramBanResult),
+    ChatAdministrators(TelegramChatAdministratorsResult),
+    ChatMember(TelegramChatMemberResult),
     Callback(TelegramCallbackResult),
 }
 
@@ -280,6 +306,8 @@ impl TelegramResult {
             Self::Delete(_) => TelegramResultKind::Delete,
             Self::Restriction(_) => TelegramResultKind::Restriction,
             Self::Ban(_) => TelegramResultKind::Ban,
+            Self::ChatAdministrators(_) => TelegramResultKind::ChatAdministrators,
+            Self::ChatMember(_) => TelegramResultKind::ChatMember,
             Self::Callback(_) => TelegramResultKind::Callback,
         }
     }
@@ -291,6 +319,8 @@ impl TelegramResult {
             Self::Delete(result) => Some(result.chat_id),
             Self::Restriction(result) => Some(result.chat_id),
             Self::Ban(result) => Some(result.chat_id),
+            Self::ChatAdministrators(result) => Some(result.chat_id),
+            Self::ChatMember(result) => Some(result.chat_id),
             Self::Callback(_) => None,
         }
     }
@@ -299,7 +329,12 @@ impl TelegramResult {
         match self {
             Self::Message(result) => Some(result.message_id),
             Self::Ui(result) => Some(result.message_id),
-            Self::Delete(_) | Self::Restriction(_) | Self::Ban(_) | Self::Callback(_) => None,
+            Self::Delete(_)
+            | Self::Restriction(_)
+            | Self::Ban(_)
+            | Self::Callback(_)
+            | Self::ChatAdministrators(_)
+            | Self::ChatMember(_) => None,
         }
     }
 
@@ -307,7 +342,12 @@ impl TelegramResult {
         match self {
             Self::Restriction(result) => Some(result.user_id),
             Self::Ban(result) => Some(result.user_id),
-            Self::Message(_) | Self::Ui(_) | Self::Delete(_) | Self::Callback(_) => None,
+            Self::ChatMember(result) => Some(result.user_id),
+            Self::Message(_)
+            | Self::Ui(_)
+            | Self::Delete(_)
+            | Self::Callback(_)
+            | Self::ChatAdministrators(_) => None,
         }
     }
 }
@@ -320,6 +360,8 @@ pub enum TelegramResultKind {
     Delete,
     Restriction,
     Ban,
+    ChatAdministrators,
+    ChatMember,
     Callback,
 }
 
@@ -392,6 +434,26 @@ pub struct TelegramBanResult {
     pub delete_history: bool,
     #[serde(default)]
     pub changed: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramChatAdministratorsResult {
+    pub chat_id: ChatId,
+    pub administrators: Vec<TelegramChatMember>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramChatMemberResult {
+    pub chat_id: ChatId,
+    pub user_id: UserId,
+    pub member: TelegramChatMember,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramChatMember {
+    pub user_id: UserId,
+    pub is_admin: bool,
+    pub can_restrict_members: Option<bool>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

@@ -280,6 +280,64 @@ impl TelegramTransport for TeloxideCoreTransport {
                     text: request.text,
                 }))
             }
+            TelegramRequest::GetChatAdministrators(request) => {
+                let admins = self
+                    .bot
+                    .get_chat_administrators(TeloxideChatId(request.chat_id))
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        map_teloxide_error(operation, error).with_details(serde_json::json!({
+                            "chat_id": request.chat_id,
+                        }))
+                    })?;
+
+                let administrators = admins
+                    .into_iter()
+                    .map(|member| TelegramChatMember {
+                        user_id: member.user.id.0 as i64,
+                        is_admin: true,
+                        can_restrict_members: Some(member.can_restrict_members()),
+                    })
+                    .collect();
+
+                Ok(TelegramResult::ChatAdministrators(
+                    TelegramChatAdministratorsResult {
+                        chat_id: request.chat_id,
+                        administrators,
+                    },
+                ))
+            }
+            TelegramRequest::GetChatMember(request) => {
+                let member = self
+                    .bot
+                    .get_chat_member(
+                        TeloxideChatId(request.chat_id),
+                        TeloxideUserId(request.user_id as u64),
+                    )
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        map_teloxide_error(operation, error).with_details(serde_json::json!({
+                            "chat_id": request.chat_id,
+                            "user_id": request.user_id,
+                        }))
+                    })?;
+
+                let is_admin = member.is_administrator() || member.is_owner();
+
+                Ok(TelegramResult::ChatMember(TelegramChatMemberResult {
+                    chat_id: request.chat_id,
+                    user_id: request.user_id,
+                    member: TelegramChatMember {
+                        user_id: request.user_id,
+                        is_admin,
+                        can_restrict_members: Some(
+                            member.is_administrator() && member.can_restrict_members(),
+                        ),
+                    },
+                }))
+            }
             TelegramRequest::SendUi(_) | TelegramRequest::EditUi(_) => Err(TelegramError::new(
                 operation,
                 TelegramErrorKind::UnsupportedOperation,

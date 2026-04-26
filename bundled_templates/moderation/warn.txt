@@ -1,1 +1,3 @@
-⚠️ Администратор {admin_link} выдал предупреждение {user_link} ({warn_count}/{warn_limit}). Причина: {reason}
+⚠️ Администратор {admin_link} выдал предупреждение {user_link} ({warn_count}/{warn_limit}).
+Причина: {reason}
+Дата: {date} {time}

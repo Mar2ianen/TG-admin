@@ -122,6 +122,19 @@ pub fn validate_request(request: &TelegramRequest) -> Result<(), TelegramError> 
                 ));
             }
         }
+        TelegramRequest::GetChatAdministrators(request) => {
+            validate_chat_id(operation, request.chat_id)?;
+        }
+        TelegramRequest::GetChatMember(request) => {
+            validate_chat_id(operation, request.chat_id)?;
+            if request.user_id <= 0 {
+                return Err(validation_error(
+                    operation,
+                    "user_id",
+                    "user_id must be positive",
+                ));
+            }
+        }
         TelegramRequest::AnswerCallback(request) => {
             if request.callback_query_id.trim().is_empty() {
                 return Err(validation_error(
