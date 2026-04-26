@@ -160,22 +160,36 @@ impl Default for ConfigStorage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct CounterConfig {
+    pub reset_hour: u32,
+}
+
+impl Default for CounterConfig {
+    fn default() -> Self {
+        Self { reset_hour: 4 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeConfig {
     pub tokio_worker_threads: Option<usize>,
     pub shutdown_grace_period_ms: u64,
     pub reload_enabled: bool,
     pub manual_mode_enabled: bool,
     pub degraded_mode_enabled: bool,
+    pub counters: CounterConfig,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             tokio_worker_threads: None,
-            shutdown_grace_period_ms: 10_000,
+            shutdown_grace_period_ms: 5000,
             reload_enabled: true,
             manual_mode_enabled: false,
-            degraded_mode_enabled: true,
+            degraded_mode_enabled: false,
+            counters: CounterConfig::default(),
         }
     }
 }

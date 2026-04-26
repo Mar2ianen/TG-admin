@@ -68,7 +68,7 @@ fn bootstrap_initializes_schema_version_once() {
         bootstrap.migration().current_version,
         crate::storage::CURRENT_SCHEMA_VERSION
     );
-    assert_eq!(bootstrap.migration().applied_versions, vec![1, 2]);
+    assert_eq!(bootstrap.migration().applied_versions, vec![1, 2, 3]);
     assert!(bootstrap.migration().changed());
 
     let row_count: u32 = bootstrap
@@ -444,7 +444,7 @@ fn migration_v2_backfills_processed_update_status_for_existing_rows() {
         migrated.migration().current_version,
         crate::storage::CURRENT_SCHEMA_VERSION
     );
-    assert_eq!(migrated.migration().applied_versions, vec![2]);
+    assert_eq!(migrated.migration().applied_versions, vec![2, 3]);
     assert_eq!(
         loaded,
         Some(crate::storage::ProcessedUpdateRecord {

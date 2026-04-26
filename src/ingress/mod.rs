@@ -127,6 +127,8 @@ impl IngressPipeline {
         }
 
         self.append_message_journal(&event)?;
+        self.update_counters(&event)?;
+
         self.router
             .route(&event)
             .await
@@ -134,6 +136,22 @@ impl IngressPipeline {
         self.complete_processed_update(&event)?;
 
         Ok(IngressProcessResult::Processed)
+    }
+
+    fn update_counters(&self, event: &EventContext) -> Result<()> {
+        if !matches!(event.update_type, UpdateType::Message) {
+            return Ok(());
+        }
+
+        let plan = self.router.plan(event);
+        if plan.classified.command_name.is_none() {
+            if let (Some(chat), Some(sender)) = (&event.chat, &event.sender) {
+                self.storage
+                    .increment_message_counters(chat.id, sender.id)?;
+            }
+        }
+
+        Ok(())
     }
 
     fn preflight_processed_update(

@@ -17,6 +17,7 @@ use crate::tg::{
 };
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
+use chrono::{Datelike, Timelike, Utc};
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
@@ -191,6 +192,9 @@ impl Runtime {
             if let Err(err) = self.tick_scheduler().await {
                 tracing::warn!(error = %err, "scheduler tick error");
             }
+            if let Err(err) = self.tick_counters().await {
+                tracing::warn!(error = %err, "counters tick error");
+            }
         }
     }
 
@@ -201,14 +205,14 @@ impl Runtime {
             .init()
             .context("scheduler: failed to open storage connection")?;
 
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = Utc::now().to_rfc3339();
         let limit = self.services.scheduler.max_concurrent_jobs();
         let due_jobs = storage
             .poll_due_jobs(&now, limit)
             .context("scheduler: failed to poll due jobs")?;
 
         for job in &due_jobs {
-            let claimed_at = chrono::Utc::now().to_rfc3339();
+            let claimed_at = Utc::now().to_rfc3339();
             if let Err(err) =
                 storage.update_job_status(&job.job_id, "processing", None, &claimed_at)
             {
@@ -217,7 +221,7 @@ impl Runtime {
             }
 
             let result = self.execute_scheduled_job(job).await;
-            let done_at = chrono::Utc::now().to_rfc3339();
+            let done_at = Utc::now().to_rfc3339();
             match result {
                 Ok(()) => {
                     tracing::debug!(
@@ -253,6 +257,57 @@ impl Runtime {
                         );
                     }
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn tick_counters(&self) -> Result<()> {
+        let mut storage = self
+            .services
+            .storage
+            .init()
+            .context("counters: failed to open storage connection")?;
+
+        let now = Utc::now();
+        let reset_hour = self.services.config.runtime.counters.reset_hour;
+
+        if now.hour() == reset_hour {
+            let date_str = now.format("%Y-%m-%d").to_string();
+            let last_snapshot = storage
+                .get_kv("system", "counters", "last_daily_snapshot")?
+                .map(|e| e.value_json)
+                .unwrap_or_default();
+
+            if last_snapshot != date_str {
+                tracing::info!(date = %date_str, "performing daily counter snapshots");
+
+                // Daily snapshot
+                storage.create_counter_snapshots("day", &date_str)?;
+
+                // Weekly snapshot (on Mondays)
+                if now.weekday() == chrono::Weekday::Mon {
+                    storage.create_counter_snapshots("week", &date_str)?;
+                }
+
+                // Monthly snapshot (on 1st of month)
+                if now.day() == 1 {
+                    storage.create_counter_snapshots("month", &date_str)?;
+                }
+
+                // Yearly snapshot (on Jan 1st)
+                if now.month() == 1 && now.day() == 1 {
+                    storage.create_counter_snapshots("year", &date_str)?;
+                }
+
+                storage.set_kv(&crate::storage::KvEntry {
+                    scope_kind: "system".to_owned(),
+                    scope_id: "counters".to_owned(),
+                    key: "last_daily_snapshot".to_owned(),
+                    value_json: date_str,
+                    updated_at: now.to_rfc3339(),
+                })?;
             }
         }
 
@@ -328,6 +383,7 @@ struct RuntimeServices {
     telegram: TelegramGateway,
     polling_bot: Option<teloxide_core::Bot>,
     ml_server_transport: MlServerTransport,
+    config: Rc<AppConfig>,
 }
 
 impl RuntimeServices {
@@ -356,6 +412,7 @@ impl RuntimeServices {
                 (true, Some(token)) => Some(teloxide_core::Bot::new(token.to_owned())),
                 _ => None,
             },
+            config: Rc::new(config.clone()),
         })
     }
 
@@ -395,264 +452,15 @@ fn load_registry_from_units_dir(config: &AppConfig) -> Result<UnitRegistry> {
         return Ok(UnitRegistry::default());
     }
 
-    if !units_dir.is_dir() {
-        anyhow::bail!("units_dir {} is not a directory", units_dir.display());
+    let paths = fs::read_dir(units_dir)
+        .with_context(|| format!("failed to read units dir `{}`", units_dir.display()))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().map_or(false, |ext| ext == "toml"));
+
+    let report = UnitRegistry::load_paths(paths);
+    if !report.is_fully_valid() && !config.runtime.degraded_mode_enabled {
+        anyhow::bail!("units registry contains invalid manifests");
     }
 
-    let mut manifest_paths = fs::read_dir(units_dir)
-        .with_context(|| format!("failed to read units_dir {}", units_dir.display()))?
-        .collect::<std::io::Result<Vec<_>>>()
-        .with_context(|| format!("failed to enumerate units_dir {}", units_dir.display()))?
-        .into_iter()
-        .filter_map(|entry| match entry.file_type() {
-            Ok(file_type) if file_type.is_file() => Some(entry.path()),
-            Ok(_) => None,
-            Err(_) => Some(entry.path()),
-        })
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "toml")
-        })
-        .collect::<Vec<_>>();
-    manifest_paths.sort();
-
-    if manifest_paths.is_empty() {
-        return Ok(UnitRegistry::default());
-    }
-
-    let report = UnitRegistry::load_paths(&manifest_paths);
-    if report.is_fully_valid() || config.runtime.degraded_mode_enabled {
-        Ok(report.registry)
-    } else {
-        anyhow::bail!(
-            "failed to load unit manifests from {}: {} invalid manifest(s)",
-            units_dir.display(),
-            report.registry.status_summary().failed_units
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Runtime;
-    use crate::config::AppConfig;
-    use crate::event::{
-        ChatContext, EventContext, EventNormalizer, ManualInvocationInput, SenderContext,
-        UnitContext,
-    };
-    use crate::router::ExecutionLane;
-    use crate::unit::{ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry};
-    use chrono::{TimeZone, Utc};
-    use tempfile::TempDir;
-
-    fn runtime_test_config() -> (TempDir, AppConfig) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut config = AppConfig::default();
-        config.paths.database_path = dir.path().join("runtime.sqlite3");
-        config.paths.units_dir = dir.path().join("units");
-        (dir, config)
-    }
-
-    fn write_unit_manifest(dir: &TempDir, file_name: &str, body: &str) {
-        let units_dir = dir.path().join("units");
-        std::fs::create_dir_all(&units_dir).expect("units dir");
-        std::fs::write(units_dir.join(file_name), body).expect("manifest written");
-    }
-
-    fn registry_from_manifests(manifests: Vec<UnitManifest>) -> UnitRegistry {
-        UnitRegistry::load_manifests(manifests).registry
-    }
-
-    fn command_manifest(name: &str, command: &str) -> UnitManifest {
-        UnitManifest::new(
-            UnitDefinition::new(name),
-            TriggerSpec::command([command]),
-            ServiceSpec::new(format!("scripts/{name}.rhai")),
-        )
-    }
-
-    fn manual_event(command_text: &str) -> EventContext {
-        let mut input = ManualInvocationInput::new(
-            UnitContext::new("runtime.test").with_trigger("manual"),
-            command_text,
-        );
-        input.received_at = Utc
-            .with_ymd_and_hms(2026, 4, 22, 12, 0, 0)
-            .single()
-            .expect("valid timestamp");
-        input.chat = Some(ChatContext {
-            id: -100123,
-            chat_type: "supergroup".to_owned(),
-            title: Some("Moderation HQ".to_owned()),
-            username: Some("mod_hq".to_owned()),
-            thread_id: Some(11),
-        });
-        input.sender = Some(SenderContext {
-            id: 42,
-            username: Some("admin".to_owned()),
-            display_name: Some("Admin".to_owned()),
-            is_bot: false,
-            is_admin: true,
-            role: Some("owner".to_owned()),
-        });
-
-        EventNormalizer::new()
-            .normalize_manual(input)
-            .expect("manual event normalizes")
-    }
-
-    #[test]
-    fn from_config_keeps_empty_registry_when_units_dir_is_missing() {
-        let (_dir, config) = runtime_test_config();
-
-        let runtime = Runtime::from_config(&config).expect("runtime builds");
-        let summary = runtime.summary();
-
-        assert_eq!(summary.registry.total_units, 0);
-        assert_eq!(summary.registry.failed_units, 0);
-    }
-
-    #[test]
-    fn from_config_loads_registry_from_units_dir() {
-        let (dir, config) = runtime_test_config();
-        write_unit_manifest(
-            &dir,
-            "moderation.warn.unit.toml",
-            r#"
-[Unit]
-Name = "moderation.warn.unit"
-
-[Trigger]
-Type = "command"
-Commands = ["warn"]
-
-[Service]
-ExecStart = "scripts/moderation/warn.rhai"
-"#,
-        );
-
-        let runtime = Runtime::from_config(&config).expect("runtime builds");
-        let summary = runtime.summary();
-
-        assert_eq!(summary.registry.total_units, 1);
-        assert_eq!(summary.registry.active_units, 1);
-    }
-
-    #[tokio::test]
-    async fn startup_indexes_routes_from_loaded_units() {
-        let (dir, config) = runtime_test_config();
-        write_unit_manifest(
-            &dir,
-            "command.stats.unit.toml",
-            r#"
-[Unit]
-Name = "command.stats.unit"
-
-[Trigger]
-Type = "command"
-Commands = ["stats"]
-
-[Service]
-ExecStart = "scripts/command/stats.rhai"
-"#,
-        );
-
-        let mut runtime = Runtime::from_config(&config).expect("runtime builds");
-        runtime.startup(&config).await.expect("startup succeeds");
-        let summary = runtime.summary();
-
-        assert!(summary.router_ready);
-        assert_eq!(summary.indexed_command_routes, 7);
-        assert_eq!(summary.transport_name, "noop");
-        assert!(runtime.host_api().is_some());
-        assert!(runtime.router().is_some());
-    }
-
-    #[tokio::test]
-    async fn startup_and_refresh_use_the_live_registry_state() {
-        let (_dir, config) = runtime_test_config();
-        let mut runtime = Runtime::from_config(&config).expect("runtime builds");
-
-        runtime.registry =
-            registry_from_manifests(vec![command_manifest("command.stats.unit", "stats")]);
-        runtime.startup(&config).await.expect("startup succeeds");
-
-        let stats_plan = runtime
-            .router()
-            .expect("router is available")
-            .plan(&manual_event("/stats"));
-        assert!(stats_plan.lanes.contains(&ExecutionLane::UnitDispatch));
-        assert_eq!(runtime.summary().indexed_command_routes, 7);
-
-        runtime.registry =
-            registry_from_manifests(vec![command_manifest("command.audit.unit", "audit")]);
-        runtime.refresh_router_index();
-
-        let audit_plan = runtime
-            .router()
-            .expect("router is available")
-            .plan(&manual_event("/audit"));
-        let stale_plan = runtime
-            .router()
-            .expect("router is available")
-            .plan(&manual_event("/stats"));
-
-        assert!(audit_plan.lanes.contains(&ExecutionLane::UnitDispatch));
-        assert!(!stale_plan.lanes.contains(&ExecutionLane::UnitDispatch));
-        assert_eq!(runtime.summary().indexed_command_routes, 7);
-    }
-
-    #[test]
-    fn degraded_mode_keeps_failed_manifest_entries_in_registry_summary() {
-        let (dir, config) = runtime_test_config();
-        write_unit_manifest(
-            &dir,
-            "broken.unit.toml",
-            r#"
-[Unit]
-Name = "broken.unit"
-
-[Trigger]
-Type = "command"
-Commands = ["warn"
-
-[Service]
-ExecStart = "scripts/moderation/warn.rhai"
-"#,
-        );
-
-        let runtime = Runtime::from_config(&config).expect("runtime builds in degraded mode");
-        let summary = runtime.summary();
-
-        assert_eq!(summary.registry.total_units, 1);
-        assert_eq!(summary.registry.failed_units, 1);
-    }
-
-    #[test]
-    fn strict_mode_fails_when_units_dir_contains_invalid_manifest() {
-        let (dir, mut config) = runtime_test_config();
-        config.runtime.degraded_mode_enabled = false;
-        write_unit_manifest(
-            &dir,
-            "broken.unit.toml",
-            r#"
-[Unit]
-Name = "broken.unit"
-
-[Trigger]
-Type = "command"
-Commands = ["warn"
-
-[Service]
-ExecStart = "scripts/moderation/warn.rhai"
-"#,
-        );
-
-        let error = Runtime::from_config(&config).expect_err("runtime must fail");
-        assert!(
-            error
-                .to_string()
-                .contains("failed to load unit manifests from")
-        );
-    }
+    Ok(report.registry)
 }

@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 pub const MIGRATION_V1_SQL: &str = "
 CREATE TABLE IF NOT EXISTS schema_bootstrap (
@@ -107,4 +107,31 @@ ALTER TABLE processed_updates
 ADD COLUMN status TEXT NOT NULL DEFAULT 'completed';
 
 PRAGMA user_version = 2;
+";
+
+pub const MIGRATION_V3_SQL: &str = "
+CREATE TABLE IF NOT EXISTS message_counters (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_counters (
+  chat_id INTEGER PRIMARY KEY,
+  count INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS counter_history (
+  chat_id INTEGER NOT NULL,
+  user_id INTEGER, -- NULL for chat-wide snapshots
+  period_type TEXT NOT NULL, -- 'day', 'week', 'month', 'year'
+  period_start TEXT NOT NULL, -- ISO date
+  count INTEGER NOT NULL,
+  PRIMARY KEY (chat_id, user_id, period_type, period_start)
+);
+
+PRAGMA user_version = 3;
 ";

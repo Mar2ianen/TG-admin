@@ -3,14 +3,30 @@ use super::error::*;
 use super::helpers::*;
 use super::schema::*;
 use super::types::*;
+use chrono::Utc;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug)]
 pub struct StorageConnection {
     pub(crate) path: PathBuf,
     pub(crate) config: StorageConfig,
     pub(crate) connection: Connection,
+}
+
+impl std::fmt::Debug for StorageConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageConnection")
+            .field("path", &self.path)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl Clone for StorageConnection {
+    fn clone(&self) -> Self {
+        Self::open(self.path.clone(), self.config.clone())
+            .expect("failed to open cloned sqlite connection")
+    }
 }
 
 impl StorageConnection {
@@ -70,6 +86,10 @@ impl StorageConnection {
             self.apply_migration_v2()?;
             applied_versions.push(2);
         }
+        if current_version < 3 {
+            self.apply_migration_v3()?;
+            applied_versions.push(3);
+        }
 
         let final_version = self.current_schema_version()?;
 
@@ -117,6 +137,17 @@ impl StorageConnection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         tx.execute_batch(MIGRATION_V2_SQL)?;
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    fn apply_migration_v3(&mut self) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        tx.execute_batch(MIGRATION_V3_SQL)?;
         tx.commit()?;
 
         Ok(())
@@ -594,6 +625,67 @@ impl StorageConnection {
             ],
         )?;
 
+        Ok(())
+    }
+
+    pub fn increment_message_counters(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+    ) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+
+        // Increment user counter in chat
+        self.connection.execute(
+            "INSERT INTO message_counters (chat_id, user_id, count, updated_at)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                count = count + 1,
+                updated_at = excluded.updated_at",
+            params![chat_id, user_id, now],
+        )?;
+
+        // Increment chat overall counter
+        self.connection.execute(
+            "INSERT INTO chat_counters (chat_id, count, updated_at)
+             VALUES (?1, 1, ?2)
+             ON CONFLICT(chat_id) DO UPDATE SET
+                count = count + 1,
+                updated_at = excluded.updated_at",
+            params![chat_id, now],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn create_counter_snapshots(
+        &mut self,
+        period_type: &str,
+        period_start: &str,
+    ) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Snapshot user counters
+        tx.execute(
+            "INSERT OR REPLACE INTO counter_history (chat_id, user_id, period_type, period_start, count)
+             SELECT chat_id, user_id, ?1, ?2, count FROM message_counters",
+            params![period_type, period_start],
+        )?;
+
+        // Snapshot chat counters
+        tx.execute(
+            "INSERT OR REPLACE INTO counter_history (chat_id, user_id, period_type, period_start, count)
+             SELECT chat_id, NULL, ?1, ?2, count FROM chat_counters",
+            params![period_type, period_start],
+        )?;
+
+        // Reset current counters
+        tx.execute("DELETE FROM message_counters", [])?;
+        tx.execute("DELETE FROM chat_counters", [])?;
+
+        tx.commit()?;
         Ok(())
     }
 }
