@@ -27,6 +27,9 @@ impl ModerationEngine {
         unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
         self.require_admin(event)?;
+        if let Some(chat) = event.chat.as_ref() {
+            self.require_bot_admin(chat.id)?;
+        }
         let effective_dry_run = self.dry_run || command_dry_run(&parsed.command);
         if matches!(
             (&expanded.command, &expanded.pipe),

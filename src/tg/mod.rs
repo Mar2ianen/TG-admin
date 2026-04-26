@@ -1,3 +1,4 @@
+pub mod init;
 mod predict;
 mod transport;
 mod types;
@@ -34,6 +35,10 @@ impl TelegramGateway {
     {
         self.transport = Arc::new(transport);
         self
+    }
+
+    pub fn transport(&self) -> &dyn TelegramTransport {
+        self.transport.as_ref()
     }
 
     pub fn polling(&self) -> bool {

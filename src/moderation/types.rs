@@ -58,6 +58,8 @@ pub enum ModerationError {
     CapabilityDenied { capability: String, unit_id: String },
     #[error("actor is not authorized for moderation actions: user_id={user_id:?}")]
     AuthorizationDenied { user_id: Option<i64> },
+    #[error("bot is not authorized to perform moderation actions in this chat")]
+    BotPermissionDenied,
     #[error("update processing was interrupted for event `{0}`")]
     ProcessingInterrupted(String),
     #[error("storage error")]

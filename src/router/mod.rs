@@ -19,16 +19,32 @@ pub struct ExecutionRouter {
     registry: RefCell<Option<Rc<UnitRegistry>>>,
     moderation: Option<ModerationEngine>,
     script_runner: Option<crate::script::ScriptRunner>,
+    gateway: Option<std::sync::Arc<crate::tg::TelegramGateway>>,
+    storage: Option<crate::storage::Storage>,
+    bot_id: i64,
 }
 
 impl ExecutionRouter {
-    pub fn new() -> Self {
+    pub fn new(bot_id: i64) -> Self {
         Self {
             index: RefCell::new(RouterIndex::new()),
             registry: RefCell::new(None),
             moderation: None,
             script_runner: None,
+            gateway: None,
+            storage: None,
+            bot_id,
         }
+    }
+
+    pub fn with_gateway(mut self, gateway: std::sync::Arc<crate::tg::TelegramGateway>) -> Self {
+        self.gateway = Some(gateway);
+        self
+    }
+
+    pub fn with_storage(mut self, storage: crate::storage::Storage) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     pub fn with_moderation(mut self, moderation: ModerationEngine) -> Self {
@@ -72,6 +88,24 @@ impl ExecutionRouter {
     }
 
     pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
+        if event.update_type == crate::event::UpdateType::MyChatMember {
+            if let (Some(gateway), Some(storage)) = (self.gateway.as_ref(), self.storage.as_ref()) {
+                if let Some(chat) = event.chat.as_ref() {
+                    let chat_id = chat.id;
+                    let bot_id = self.bot_id;
+                    let gateway = gateway.clone();
+                    let storage = storage.clone();
+                    tokio::spawn(async move {
+                        let initializer =
+                            crate::tg::init::ChatInitializer::new(gateway.transport(), &storage);
+                        if let Err(e) = initializer.initialize_chat(chat_id, bot_id).await {
+                            tracing::error!(chat_id = %chat_id, error = %e, "failed to initialize chat admins");
+                        }
+                    });
+                }
+            }
+        }
+
         let plan = self.plan(event);
 
         let registry_guard = self.registry.borrow();

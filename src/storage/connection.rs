@@ -688,4 +688,24 @@ impl StorageConnection {
         tx.commit()?;
         Ok(())
     }
+
+    pub fn set_bot_is_admin(&self, chat_id: i64, is_admin: bool) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+        self.set_kv(&crate::storage::KvEntry {
+            scope_kind: "chat".to_owned(),
+            scope_id: chat_id.to_string(),
+            key: "bot_is_admin".to_owned(),
+            value_json: serde_json::json!(is_admin).to_string(),
+            updated_at: now,
+        })
+    }
+
+    pub fn get_bot_is_admin(&self, chat_id: i64) -> Result<bool, StorageError> {
+        self.get_kv("chat", &chat_id.to_string(), "bot_is_admin")
+            .map(|entry| {
+                entry
+                    .map(|e| serde_json::from_str(&e.value_json).unwrap_or(false))
+                    .unwrap_or(false)
+            })
+    }
 }

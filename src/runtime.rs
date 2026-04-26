@@ -21,6 +21,7 @@ use chrono::{Datelike, Timelike, Utc};
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use tokio::time;
 
 // Runtime execution model: single-threaded by design.
@@ -111,10 +112,12 @@ impl Runtime {
             .with_ml_server_transport(self.services.ml_server_transport.clone());
         let script_runner = ScriptRunner::new(config.paths.scripts_dir.clone());
         let router = Rc::new(
-            ExecutionRouter::new()
+            ExecutionRouter::new(0) // TODO: Get real bot ID
                 .with_registry_handle(registry_handle.clone())
                 .with_moderation(moderation)
-                .with_script_runner(script_runner, script_host_api),
+                .with_script_runner(script_runner, script_host_api)
+                .with_gateway(Arc::new(self.services.telegram.clone()))
+                .with_storage(self.services.storage.clone()),
         );
         let ingress = self.services.polling_bot().map(|bot| {
             IngressPipeline::new(bot, ingress_storage, router.clone())

@@ -248,6 +248,13 @@ impl ModerationEngine {
         })
     }
 
+    pub(crate) fn require_bot_admin(&self, chat_id: i64) -> Result<(), ModerationError> {
+        if !self.storage.get_bot_is_admin(chat_id)? {
+            return Err(ModerationError::BotPermissionDenied);
+        }
+        Ok(())
+    }
+
     pub(crate) fn build_audit_entry(
         &self,
         event: &EventContext,
