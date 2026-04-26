@@ -5,10 +5,29 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModerationConfig {
+    pub delete_unknown: bool,
+    pub delete_executed: bool,
+    pub delete_targets: bool,
+}
+
+impl Default for ModerationConfig {
+    fn default() -> Self {
+        Self {
+            delete_unknown: true,
+            delete_executed: true,
+            delete_targets: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
     pub telegram: TelegramConfig,
+    pub moderation: ModerationConfig,
     pub paths: PathsConfig,
     pub storage: ConfigStorage,
     pub runtime: RuntimeConfig,

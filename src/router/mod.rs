@@ -22,10 +22,11 @@ pub struct ExecutionRouter {
     gateway: Option<std::sync::Arc<crate::tg::TelegramGateway>>,
     storage: Option<crate::storage::Storage>,
     bot_id: i64,
+    delete_unknown_commands: bool,
 }
 
 impl ExecutionRouter {
-    pub fn new(bot_id: i64) -> Self {
+    pub fn new(bot_id: i64, delete_unknown_commands: bool) -> Self {
         Self {
             index: RefCell::new(RouterIndex::new()),
             registry: RefCell::new(None),
@@ -34,6 +35,7 @@ impl ExecutionRouter {
             gateway: None,
             storage: None,
             bot_id,
+            delete_unknown_commands,
         }
     }
 
@@ -107,6 +109,43 @@ impl ExecutionRouter {
         }
 
         let plan = self.plan(event);
+
+        // Перехват неизвестных команд
+        if let Some(cmd_name) = plan.classified.command_name.as_ref() {
+            if !self.index.borrow().is_known_command(cmd_name) {
+                if let Some(moderation) = self.moderation.as_ref() {
+                    let _ = moderation
+                        .handle_error(
+                            event,
+                            crate::moderation::ModerationError::UnsupportedCommand(
+                                cmd_name.clone(),
+                            ),
+                        )
+                        .await;
+
+                    if self.delete_unknown_commands {
+                        if let (Some(msg), Some(gateway)) =
+                            (event.message.as_ref(), self.gateway.as_ref())
+                        {
+                            let chat_id = event.chat.as_ref().map(|c| c.id).unwrap_or(0);
+                            let del_req = crate::tg::TelegramRequest::Delete(
+                                crate::tg::TelegramDeleteRequest {
+                                    chat_id,
+                                    message_id: msg.id,
+                                    idempotency_key: None,
+                                },
+                            );
+                            let gateway = gateway.clone();
+                            tokio::spawn(async move {
+                                let _ = gateway.execute(del_req).await;
+                            });
+                        }
+                    }
+
+                    return Ok(ExecutionOutcome::Unhandled(plan));
+                }
+            }
+        }
 
         let registry_guard = self.registry.borrow();
         let fallback_registry = UnitRegistry::new();
@@ -193,6 +232,10 @@ impl RouterIndex {
             }
         }
         index
+    }
+
+    pub fn is_known_command(&self, command: &str) -> bool {
+        self.command_index.contains_key(&command.to_lowercase())
     }
 
     pub fn stats(&self) -> RouterIndexStats {

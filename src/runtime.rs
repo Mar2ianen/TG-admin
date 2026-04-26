@@ -112,7 +112,7 @@ impl Runtime {
             .with_ml_server_transport(self.services.ml_server_transport.clone());
         let script_runner = ScriptRunner::new(config.paths.scripts_dir.clone());
         let router = Rc::new(
-            ExecutionRouter::new(0) // TODO: Get real bot ID
+            ExecutionRouter::new(0, config.moderation.delete_unknown) // TODO: Get real bot ID
                 .with_registry_handle(registry_handle.clone())
                 .with_moderation(moderation)
                 .with_script_runner(script_runner, script_host_api)

@@ -60,6 +60,8 @@ pub enum ModerationError {
     AuthorizationDenied { user_id: Option<i64> },
     #[error("bot is not authorized to perform moderation actions in this chat")]
     BotPermissionDenied,
+    #[error("target `{target_name}` is protected")]
+    TargetProtected { target_name: String },
     #[error("update processing was interrupted for event `{0}`")]
     ProcessingInterrupted(String),
     #[error("storage error")]

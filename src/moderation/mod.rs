@@ -1,6 +1,7 @@
 mod audit;
 mod commands;
 mod helpers;
+mod reactions;
 mod types;
 mod undo;
 
@@ -252,6 +253,29 @@ impl ModerationEngine {
         if !self.storage.get_bot_is_admin(chat_id)? {
             return Err(ModerationError::BotPermissionDenied);
         }
+        Ok(())
+    }
+
+    pub async fn handle_error(
+        &self,
+        event: &EventContext,
+        err: ModerationError,
+    ) -> Result<(), crate::tg::TelegramError> {
+        let (template_name, _context) = crate::moderation::reactions::error_to_template(&err);
+
+        // Временная реализация: отправляем простой текст, так как полноценный UI шаблон требует HostApi
+        let text = format!("Ошибка: {}", err);
+        let request =
+            crate::tg::TelegramRequest::SendMessage(crate::tg::TelegramSendMessageRequest {
+                chat_id: event.chat.as_ref().map(|c| c.id).unwrap_or(0),
+                text,
+                reply_to_message_id: event.message.as_ref().map(|m| m.id),
+                silent: false,
+                parse_mode: crate::tg::ParseMode::PlainText,
+                markup: None,
+            });
+
+        self.gateway.execute(request).await?;
         Ok(())
     }
 
