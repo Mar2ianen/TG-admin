@@ -51,6 +51,16 @@ impl TemplateContext {
         self
     }
 
+    pub fn with_event(mut self, event: &EventContext) -> Self {
+        if let Some(sender) = &event.sender {
+            self = self.with_user(sender);
+        }
+        if let Some(chat) = &event.chat {
+            self = self.with_chat(chat);
+        }
+        self.with_cron_metadata()
+    }
+
     pub fn into_map(self) -> HashMap<String, String> {
         self.vars
     }

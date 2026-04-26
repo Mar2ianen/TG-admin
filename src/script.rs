@@ -321,15 +321,7 @@ fn build_engine(max_ops: u64) -> Engine {
     engine.register_fn("render_auto", |template_name: String| -> String {
         with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let template = host_api.load_template(&template_name);
-            let mut ctx = crate::host_api::template::TemplateContext::new();
-
-            if let Some(sender) = &event.sender {
-                ctx = ctx.with_user(sender);
-            }
-            if let Some(chat) = &event.chat {
-                ctx = ctx.with_chat(chat);
-            }
-            ctx = ctx.with_cron_metadata();
+            let ctx = crate::host_api::template::TemplateContext::new().with_event(event);
 
             host_api.render_template(&template, ctx.into_map())
         })
