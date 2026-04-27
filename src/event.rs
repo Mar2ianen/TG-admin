@@ -560,6 +560,7 @@ pub struct ChatContext {
     pub chat_type: String,
     pub title: Option<String>,
     pub username: Option<String>,
+    pub photo_file_id: Option<String>,
     pub thread_id: Option<i64>,
 }
 
@@ -581,6 +582,7 @@ pub struct SenderContext {
     pub display_name: Option<String>,
     pub first_name: String,
     pub last_name: Option<String>,
+    pub photo_file_id: Option<String>,
     pub is_bot: bool,
     pub is_admin: bool,
     pub role: Option<String>,
