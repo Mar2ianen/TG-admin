@@ -142,6 +142,10 @@ pub enum UnitEventType {
     Message,
     CallbackQuery,
     MemberJoined,
+    MemberLeft,
+    MemberUpdated,
+    ReactionAdded,
+    ReactionRemoved,
     Job,
 }
 

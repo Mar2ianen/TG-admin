@@ -11,8 +11,8 @@ use teloxide_core::types::{
 };
 
 use crate::event::{
-    CallbackContext, ChatContext, EventContext, EventNormalizer, MessageContentKind,
-    MessageContext, ReplyContext, SenderContext, TelegramUpdateInput, UpdateType,
+    CallbackContext, ChatContext, EventContext, EventNormalizer, MemberContext, MessageContentKind,
+    MessageContext, ReactionContext, ReplyContext, SenderContext, TelegramUpdateInput, UpdateType,
 };
 use crate::router::ExecutionRouter;
 use crate::shutdown::{ShutdownController, ShutdownReason};
@@ -88,6 +88,8 @@ impl IngressPipeline {
                 AllowedUpdate::MyChatMember,
                 AllowedUpdate::ChatMember,
                 AllowedUpdate::ChatJoinRequest,
+                AllowedUpdate::MessageReaction,
+                AllowedUpdate::MessageReactionCount,
             ]);
 
         if let Some(offset) = offset {
@@ -266,20 +268,16 @@ fn update_to_input_with_admin_user_ids(
         UpdateKind::CallbackQuery(callback) => {
             callback_update_input(update.id.0, callback, admin_user_ids)
         }
-        UpdateKind::ChatMember(member) => Ok(Some(chat_member_update_input(
+        UpdateKind::ChatMember(member) => Ok(Some(chat_member_updated_to_input(
             update.id.0,
             UpdateType::ChatMember,
-            &member.chat,
-            &member.from,
-            member.date,
+            member,
             admin_user_ids,
         ))),
-        UpdateKind::MyChatMember(member) => Ok(Some(chat_member_update_input(
+        UpdateKind::MyChatMember(member) => Ok(Some(chat_member_updated_to_input(
             update.id.0,
             UpdateType::MyChatMember,
-            &member.chat,
-            &member.from,
-            member.date,
+            member,
             admin_user_ids,
         ))),
         UpdateKind::ChatJoinRequest(request) => Ok(Some(chat_member_update_input(
@@ -288,6 +286,18 @@ fn update_to_input_with_admin_user_ids(
             &request.chat,
             &request.from,
             request.date,
+            admin_user_ids,
+        ))),
+        UpdateKind::MessageReaction(reaction) => Ok(Some(reaction_update_input(
+            update.id.0,
+            UpdateType::MessageReaction,
+            reaction,
+            admin_user_ids,
+        ))),
+        UpdateKind::MessageReactionCount(reaction) => Ok(Some(reaction_count_update_input(
+            update.id.0,
+            UpdateType::MessageReactionCount,
+            reaction,
             admin_user_ids,
         ))),
         _ => Ok(None),
@@ -311,6 +321,8 @@ fn message_update_input(
         message: Some(message_context(message)),
         reply: reply_context_from_message(message),
         callback: None,
+        chat_member: None,
+        reaction: None,
         locale: None,
         trace_id: None,
         build: None,
@@ -360,10 +372,41 @@ fn callback_update_input(
             origin_chat_id: Some(maybe_message.chat().id.0),
             from_user_id: callback.from.id.0 as i64,
         }),
+        chat_member: None,
+        reaction: None,
         locale: callback.from.language_code.clone(),
         trace_id: None,
         build: None,
     }))
+}
+
+fn chat_member_updated_to_input(
+    update_id: u32,
+    update_type: UpdateType,
+    member: &teloxide_core::types::ChatMemberUpdated,
+    admin_user_ids: &[i64],
+) -> TelegramUpdateInput {
+    TelegramUpdateInput {
+        event_id: None,
+        update_id: u64::from(update_id),
+        update_type,
+        received_at: member.date,
+        execution_mode: crate::event::ExecutionMode::Realtime,
+        chat: chat_context_without_message(&member.chat),
+        sender: Some(sender_context_from_user(&member.from, admin_user_ids)),
+        message: None,
+        reply: None,
+        callback: None,
+        chat_member: Some(MemberContext {
+            old_status: format!("{:?}", member.old_chat_member.kind),
+            new_status: format!("{:?}", member.new_chat_member.kind),
+            user: sender_context_from_user(&member.new_chat_member.user, admin_user_ids),
+        }),
+        reaction: None,
+        locale: member.from.language_code.clone(),
+        trace_id: None,
+        build: None,
+    }
 }
 
 fn chat_member_update_input(
@@ -385,7 +428,83 @@ fn chat_member_update_input(
         message: None,
         reply: None,
         callback: None,
+        chat_member: None,
+        reaction: None,
         locale: sender.language_code.clone(),
+        trace_id: None,
+        build: None,
+    }
+}
+
+fn reaction_update_input(
+    update_id: u32,
+    update_type: UpdateType,
+    reaction: &teloxide_core::types::MessageReactionUpdated,
+    admin_user_ids: &[i64],
+) -> TelegramUpdateInput {
+    let sender = reaction
+        .user()
+        .clone()
+        .map(|user| sender_context_from_user(&user, admin_user_ids));
+    TelegramUpdateInput {
+        event_id: None,
+        update_id: u64::from(update_id),
+        update_type,
+        received_at: Utc::now(),
+        execution_mode: crate::event::ExecutionMode::Realtime,
+        chat: chat_context_without_message(&reaction.chat),
+        sender,
+        message: None,
+        reply: None,
+        callback: None,
+        chat_member: None,
+        reaction: Some(ReactionContext {
+            message_id: reaction.message_id.0,
+            old_reaction: reaction
+                .old_reaction
+                .iter()
+                .map(|r| format!("{:?}", r))
+                .collect(),
+            new_reaction: reaction
+                .new_reaction
+                .iter()
+                .map(|r| format!("{:?}", r))
+                .collect(),
+        }),
+        locale: None,
+        trace_id: None,
+        build: None,
+    }
+}
+
+fn reaction_count_update_input(
+    update_id: u32,
+    update_type: UpdateType,
+    reaction: &teloxide_core::types::MessageReactionCountUpdated,
+    _admin_user_ids: &[i64],
+) -> TelegramUpdateInput {
+    TelegramUpdateInput {
+        event_id: None,
+        update_id: u64::from(update_id),
+        update_type,
+        received_at: Utc::now(),
+        execution_mode: crate::event::ExecutionMode::Realtime,
+        chat: chat_context_without_message(&reaction.chat),
+        sender: None,
+        message: None,
+        reply: None,
+        callback: None,
+        chat_member: None,
+        reaction: Some(ReactionContext {
+            message_id: reaction.message_id.0,
+            old_reaction: Vec::new(),
+            new_reaction: reaction
+                .reactions
+                .iter()
+                .map(|r| format!("{:?}", r.r#type))
+                .collect(),
+        }),
+        locale: None,
         trace_id: None,
         build: None,
     }
@@ -444,6 +563,8 @@ fn sender_context(user: &User, is_admin: bool) -> SenderContext {
                 .join(" "),
         )
         .filter(|name| !name.is_empty()),
+        first_name: user.first_name.clone(),
+        last_name: user.last_name.clone(),
         is_bot: user.is_bot,
         is_admin,
         role: None,
@@ -547,6 +668,9 @@ fn update_type_name(update_type: UpdateType) -> &'static str {
         UpdateType::CallbackQuery => "callback_query",
         UpdateType::ChatMember => "chat_member",
         UpdateType::MyChatMember => "my_chat_member",
+        UpdateType::ChatMemberUpdated => "chat_member_updated",
+        UpdateType::MessageReaction => "message_reaction",
+        UpdateType::MessageReactionCount => "message_reaction_count",
         UpdateType::JoinRequest => "join_request",
         UpdateType::Job => "job",
         UpdateType::System => "system",

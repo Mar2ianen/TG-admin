@@ -1,5 +1,6 @@
 mod audit;
 mod commands;
+mod events;
 mod helpers;
 mod reactions;
 mod types;
@@ -9,7 +10,9 @@ use std::rc::Rc;
 
 pub use audit::*;
 pub use commands::*;
+pub use events::*;
 pub use helpers::*;
+pub use reactions::*;
 pub use types::*;
 pub use undo::*;
 
@@ -247,6 +250,30 @@ impl ModerationEngine {
         Err(ModerationError::AuthorizationDenied {
             user_id: Some(sender.id),
         })
+    }
+
+    pub async fn register_member(
+        &self,
+        user_id: i64,
+        username: Option<String>,
+        display_name: Option<String>,
+    ) -> Result<(), ModerationError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let patch = crate::storage::UserPatch {
+            user_id,
+            username,
+            display_name,
+            seen_at: now.clone(),
+            warn_count: None,
+            shadowbanned: None,
+            reputation: None,
+            state_json: None,
+            updated_at: now,
+        };
+        self.storage
+            .upsert_user(&patch)
+            .map_err(ModerationError::Storage)?;
+        Ok(())
     }
 
     pub(crate) fn require_bot_admin(&self, chat_id: i64) -> Result<(), ModerationError> {

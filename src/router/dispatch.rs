@@ -47,7 +47,7 @@ pub fn match_trigger(trigger: &TriggerSpec, event: &EventContext) -> Option<Unit
                 })
         }
         TriggerSpec::EventType { events } => {
-            let unit_event = unit_event_type_for(event.update_type)?;
+            let unit_event = unit_event_type_for(event)?;
             events
                 .iter()
                 .copied()
@@ -70,15 +70,35 @@ fn trigger_text(event: &EventContext) -> Option<&str> {
         })
 }
 
-fn unit_event_type_for(update_type: UpdateType) -> Option<crate::unit::UnitEventType> {
-    match update_type {
+fn unit_event_type_for(event: &EventContext) -> Option<crate::unit::UnitEventType> {
+    match event.update_type {
         UpdateType::Message
         | UpdateType::EditedMessage
         | UpdateType::ChannelPost
         | UpdateType::EditedChannelPost => Some(crate::unit::UnitEventType::Message),
         UpdateType::CallbackQuery => Some(crate::unit::UnitEventType::CallbackQuery),
         UpdateType::Job => Some(crate::unit::UnitEventType::Job),
-        UpdateType::ChatMember => Some(crate::unit::UnitEventType::MemberJoined),
-        UpdateType::MyChatMember | UpdateType::JoinRequest | UpdateType::System => None,
+        UpdateType::ChatMember | UpdateType::MyChatMember | UpdateType::ChatMemberUpdated => {
+            let member = event.chat_member.as_ref()?;
+            match (member.old_status.as_str(), member.new_status.as_str()) {
+                ("Left" | "Kicked", "Member" | "Administrator" | "Owner" | "Restricted") => {
+                    Some(crate::unit::UnitEventType::MemberJoined)
+                }
+                ("Member" | "Administrator" | "Owner" | "Restricted", "Left" | "Kicked") => {
+                    Some(crate::unit::UnitEventType::MemberLeft)
+                }
+                _ => Some(crate::unit::UnitEventType::MemberUpdated),
+            }
+        }
+        UpdateType::MessageReaction | UpdateType::MessageReactionCount => {
+            let reaction = event.reaction.as_ref()?;
+            if reaction.new_reaction.is_empty() && !reaction.old_reaction.is_empty() {
+                Some(crate::unit::UnitEventType::ReactionRemoved)
+            } else {
+                Some(crate::unit::UnitEventType::ReactionAdded)
+            }
+        }
+        UpdateType::JoinRequest => Some(crate::unit::UnitEventType::MemberJoined),
+        _ => None,
     }
 }

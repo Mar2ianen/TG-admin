@@ -20,6 +20,8 @@ pub struct EventContext {
     pub message: Option<MessageContext>,
     pub reply: Option<ReplyContext>,
     pub callback: Option<CallbackContext>,
+    pub chat_member: Option<MemberContext>,
+    pub reaction: Option<ReactionContext>,
     pub job: Option<JobContext>,
     pub system: SystemContext,
 }
@@ -65,6 +67,8 @@ impl EventContext {
             message: None,
             reply: None,
             callback: None,
+            chat_member: None,
+            reaction: None,
             job: None,
             system,
         }
@@ -148,6 +152,22 @@ impl EventContext {
 
         if matches!(self.update_type, UpdateType::CallbackQuery) != self.callback.is_some() {
             bail!("callback context must exist only for callback_query events");
+        }
+
+        if matches!(
+            self.update_type,
+            UpdateType::ChatMember | UpdateType::MyChatMember | UpdateType::ChatMemberUpdated
+        ) != self.chat_member.is_some()
+        {
+            bail!("member context must exist for chat member updates");
+        }
+
+        if matches!(
+            self.update_type,
+            UpdateType::MessageReaction | UpdateType::MessageReactionCount
+        ) != self.reaction.is_some()
+        {
+            bail!("reaction context must exist for reaction updates");
         }
 
         if matches!(self.update_type, UpdateType::Job) != self.job.is_some() {
@@ -343,6 +363,8 @@ impl EventNormalizer {
         event.message = input.message;
         event.reply = input.reply;
         event.callback = input.callback;
+        event.chat_member = input.chat_member;
+        event.reaction = input.reaction;
 
         validate_event(event)
     }
@@ -357,6 +379,8 @@ pub struct ManualInvocationInput {
     pub chat: Option<ChatContext>,
     pub sender: Option<SenderContext>,
     pub reply: Option<ReplyContext>,
+    pub chat_member: Option<MemberContext>,
+    pub reaction: Option<ReactionContext>,
     pub locale: Option<String>,
     pub trace_id: Option<String>,
     pub build: Option<String>,
@@ -372,6 +396,8 @@ impl ManualInvocationInput {
             chat: None,
             sender: None,
             reply: None,
+            chat_member: None,
+            reaction: None,
             locale: None,
             trace_id: None,
             build: None,
@@ -392,6 +418,8 @@ pub struct ScheduledJobInput {
     pub chat: Option<ChatContext>,
     pub sender: Option<SenderContext>,
     pub reply: Option<ReplyContext>,
+    pub chat_member: Option<MemberContext>,
+    pub reaction: Option<ReactionContext>,
     pub locale: Option<String>,
     pub trace_id: Option<String>,
     pub build: Option<String>,
@@ -417,6 +445,8 @@ impl ScheduledJobInput {
             chat: None,
             sender: None,
             reply: None,
+            chat_member: None,
+            reaction: None,
             locale: None,
             trace_id: None,
             build: None,
@@ -436,6 +466,8 @@ pub struct TelegramUpdateInput {
     pub message: Option<MessageContext>,
     pub reply: Option<ReplyContext>,
     pub callback: Option<CallbackContext>,
+    pub chat_member: Option<MemberContext>,
+    pub reaction: Option<ReactionContext>,
     pub locale: Option<String>,
     pub trace_id: Option<String>,
     pub build: Option<String>,
@@ -459,6 +491,8 @@ impl TelegramUpdateInput {
             message: Some(message),
             reply: None,
             callback: None,
+            chat_member: None,
+            reaction: None,
             locale: None,
             trace_id: None,
             build: None,
@@ -502,6 +536,9 @@ pub enum UpdateType {
     CallbackQuery,
     ChatMember,
     MyChatMember,
+    ChatMemberUpdated,
+    MessageReaction,
+    MessageReactionCount,
     JoinRequest,
     Job,
     System,
@@ -542,9 +579,42 @@ pub struct SenderContext {
     pub id: i64,
     pub username: Option<String>,
     pub display_name: Option<String>,
+    pub first_name: String,
+    pub last_name: Option<String>,
     pub is_bot: bool,
     pub is_admin: bool,
     pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberContext {
+    pub old_status: String,
+    pub new_status: String,
+    pub user: SenderContext,
+}
+
+impl MemberContext {
+    pub fn is_joined(&self) -> bool {
+        matches!(self.old_status.as_str(), "Left" | "Kicked")
+            && matches!(
+                self.new_status.as_str(),
+                "Member" | "Administrator" | "Owner" | "Restricted"
+            )
+    }
+
+    pub fn is_left(&self) -> bool {
+        matches!(
+            self.old_status.as_str(),
+            "Member" | "Administrator" | "Owner" | "Restricted"
+        ) && matches!(self.new_status.as_str(), "Left" | "Kicked")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReactionContext {
+    pub message_id: i32,
+    pub old_reaction: Vec<String>,
+    pub new_reaction: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -772,7 +842,10 @@ fn validate_telegram_shape(input: &TelegramUpdateInput) -> Result<(), EventNorma
                 return Err(EventNormalizationError::MissingTelegramCallback);
             }
         }
-        UpdateType::ChatMember | UpdateType::MyChatMember | UpdateType::JoinRequest => {
+        UpdateType::ChatMember
+        | UpdateType::MyChatMember
+        | UpdateType::ChatMemberUpdated
+        | UpdateType::JoinRequest => {
             if input.message.is_some() {
                 return Err(EventNormalizationError::InvalidEvent(anyhow::anyhow!(
                     "chat-member-style telegram updates must not include message context"
@@ -781,6 +854,13 @@ fn validate_telegram_shape(input: &TelegramUpdateInput) -> Result<(), EventNorma
             if input.callback.is_some() {
                 return Err(EventNormalizationError::InvalidEvent(anyhow::anyhow!(
                     "chat-member-style telegram updates must not include callback context"
+                )));
+            }
+        }
+        UpdateType::MessageReaction | UpdateType::MessageReactionCount => {
+            if input.message.is_some() {
+                return Err(EventNormalizationError::InvalidEvent(anyhow::anyhow!(
+                    "reaction-style telegram updates must not include message context"
                 )));
             }
         }

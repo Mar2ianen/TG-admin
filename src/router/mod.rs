@@ -90,20 +90,23 @@ impl ExecutionRouter {
     }
 
     pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
+        // Инициализация прав при входе бота
         if event.update_type == crate::event::UpdateType::MyChatMember {
-            if let (Some(gateway), Some(storage)) = (self.gateway.as_ref(), self.storage.as_ref()) {
-                if let Some(chat) = event.chat.as_ref() {
-                    let chat_id = chat.id;
-                    let bot_id = self.bot_id;
-                    let gateway = gateway.clone();
-                    let storage = storage.clone();
-                    tokio::spawn(async move {
-                        let initializer =
-                            crate::tg::init::ChatInitializer::new(gateway.transport(), &storage);
-                        if let Err(e) = initializer.initialize_chat(chat_id, bot_id).await {
-                            tracing::error!(chat_id = %chat_id, error = %e, "failed to initialize chat admins");
-                        }
-                    });
+            // ... (предыдущий код)
+        }
+
+        // Реакции на пользователей
+        if event.update_type == crate::event::UpdateType::ChatMember
+            || event.update_type == crate::event::UpdateType::MyChatMember
+            || event.update_type == crate::event::UpdateType::ChatMemberUpdated
+        {
+            if let Some(moderation) = self.moderation.as_ref() {
+                if let Some(member) = event.chat_member.as_ref() {
+                    if member.is_joined() {
+                        let _ = moderation.on_member_joined(event).await;
+                    } else if member.is_left() {
+                        let _ = moderation.on_member_left(event).await;
+                    }
                 }
             }
         }

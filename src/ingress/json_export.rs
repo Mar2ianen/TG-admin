@@ -85,7 +85,9 @@ impl JsonExportAdapter {
         let sender = SenderContext {
             id: sender_id,
             username: None,
-            display_name: msg.from.or(msg.actor),
+            display_name: msg.from.clone().or(msg.actor.clone()),
+            first_name: msg.from.clone().or(msg.actor.clone()).unwrap_or_default(),
+            last_name: None,
             is_bot: sender_id_str.starts_with("bot"),
             is_admin: false,
             role: None,
@@ -131,6 +133,8 @@ impl JsonExportAdapter {
             message,
             reply: None, // We don't have enough info for full ReplyContext easily here
             callback: None,
+            chat_member: None,
+            reaction: None,
             locale: None,
             trace_id: None,
             build: None,
