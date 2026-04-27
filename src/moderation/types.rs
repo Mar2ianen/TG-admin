@@ -6,6 +6,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpamType {
+    CryptoScam,
+    DatingBot,
+    CasinoAds,
+    ChannelPromotion,
+    AdultContent,
+    UnknownSpam,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalSpammerRecord {
+    pub user_id: i64,
+    pub phash: Option<String>,
+    pub bio_text: Option<String>,
+    pub spam_type: SpamType,
+    pub first_detected_at: chrono::DateTime<chrono::Utc>,
+    pub detection_source: String, // ID чата или юнита
+    pub confidence: u8,           // 0-100
+}
+
 #[derive(Debug, Clone)]
 pub struct ModerationUnitPolicy {
     pub unit: UnitContext,

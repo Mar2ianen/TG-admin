@@ -36,6 +36,7 @@ pub struct AppConfig {
     pub fetch_policy: FetchPolicyConfig,
     pub scheduler: SchedulerConfig,
     pub observability: ObservabilityConfig,
+    pub reputation: ReputationConfig,
     pub features: FeatureFlags,
 }
 
@@ -78,6 +79,22 @@ impl AppConfig {
             temp_store: TempStoreMode::Memory,
             foreign_keys: true,
         })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReputationConfig {
+    pub base_url: String,
+    pub enabled: bool,
+}
+
+impl Default for ReputationConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "http://localhost:8080".to_owned(),
+            enabled: false,
+        }
     }
 }
 

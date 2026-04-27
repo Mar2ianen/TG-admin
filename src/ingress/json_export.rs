@@ -52,6 +52,7 @@ impl JsonExportAdapter {
             chat_type: export.chat_type,
             title: Some(export.name),
             username: None,
+            photo_file_id: None,
             thread_id: None,
         };
 
@@ -88,6 +89,7 @@ impl JsonExportAdapter {
             display_name: msg.from.clone().or(msg.actor.clone()),
             first_name: msg.from.clone().or(msg.actor.clone()).unwrap_or_default(),
             last_name: None,
+            photo_file_id: None,
             is_bot: sender_id_str.starts_with("bot"),
             is_admin: false,
             role: None,

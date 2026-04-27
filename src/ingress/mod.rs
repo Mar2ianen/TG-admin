@@ -519,11 +519,19 @@ fn chat_context(chat: &Chat, message: &Message) -> ChatContext {
 fn chat_context_without_message(chat: &Chat) -> ChatContext {
     let (chat_type, username) = match &chat.kind {
         ChatKind::Private(private) => ("private".to_owned(), private.username.clone()),
-        ChatKind::Public(public) => match &public.kind {
-            PublicChatKind::Channel(channel) => ("channel".to_owned(), channel.username.clone()),
-            PublicChatKind::Group => ("group".to_owned(), None),
-            PublicChatKind::Supergroup(group) => ("supergroup".to_owned(), group.username.clone()),
-        },
+        ChatKind::Public(public) => {
+            let username = match &public.kind {
+                PublicChatKind::Channel(channel) => channel.username.clone(),
+                PublicChatKind::Group => None,
+                PublicChatKind::Supergroup(group) => group.username.clone(),
+            };
+            let chat_type = match &public.kind {
+                PublicChatKind::Channel(_) => "channel".to_owned(),
+                PublicChatKind::Group => "group".to_owned(),
+                PublicChatKind::Supergroup(_) => "supergroup".to_owned(),
+            };
+            (chat_type, username)
+        }
     };
 
     ChatContext {
@@ -531,6 +539,7 @@ fn chat_context_without_message(chat: &Chat) -> ChatContext {
         chat_type,
         title: chat.title().map(str::to_owned),
         username,
+        photo_file_id: None,
         thread_id: None,
     }
 }
@@ -565,6 +574,7 @@ fn sender_context(user: &User, is_admin: bool) -> SenderContext {
         .filter(|name| !name.is_empty()),
         first_name: user.first_name.clone(),
         last_name: user.last_name.clone(),
+        photo_file_id: None, // User photo must be fetched via HostApi
         is_bot: user.is_bot,
         is_admin,
         role: None,

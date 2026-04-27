@@ -7,6 +7,7 @@ pub mod ingress;
 pub mod moderation;
 pub mod observability;
 pub mod parser;
+pub mod reputation;
 pub mod router;
 pub mod runtime;
 pub mod scheduler;

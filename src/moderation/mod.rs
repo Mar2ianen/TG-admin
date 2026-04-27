@@ -19,6 +19,7 @@ pub use undo::*;
 use crate::event::EventContext;
 use crate::parser::dispatch::{CommandDispatchResult, EventCommandDispatcher};
 use crate::parser::reason::ReasonAliasRegistry;
+use crate::reputation::ReputationClient;
 use crate::storage::{
     PROCESSED_UPDATE_STATUS_COMPLETED, PROCESSED_UPDATE_STATUS_PENDING, ProcessedUpdateRecord,
     StorageConnection,
@@ -31,6 +32,7 @@ pub struct ModerationEngine {
     pub(crate) dry_run: bool,
     pub(crate) storage: Rc<StorageConnection>,
     pub(crate) unit_registry: Option<Rc<UnitRegistry>>,
+    pub(crate) reputation: Option<Rc<ReputationClient>>,
     pub(crate) dispatcher: EventCommandDispatcher,
     pub(crate) gateway: TelegramGateway,
     pub(crate) admin_user_ids: Vec<i64>,
@@ -43,11 +45,17 @@ impl ModerationEngine {
             dry_run: false,
             storage: Rc::new(storage),
             unit_registry: None,
+            reputation: None,
             dispatcher: EventCommandDispatcher::new(),
             gateway,
             admin_user_ids: Vec::new(),
             processed_update_guard: true,
         }
+    }
+
+    pub fn with_reputation_client(mut self, client: Rc<ReputationClient>) -> Self {
+        self.reputation = Some(client);
+        self
     }
 
     pub fn with_storage_handle(mut self, storage: Rc<StorageConnection>) -> Self {
@@ -313,6 +321,15 @@ impl ModerationEngine {
         spec: AuditEntrySpec<'_>,
     ) -> crate::storage::AuditLogEntry {
         audit::build_audit_entry(event, unit_policy, spec)
+    }
+}
+
+fn execution_mode_name(mode: crate::event::ExecutionMode) -> &'static str {
+    match mode {
+        crate::event::ExecutionMode::Realtime => "realtime",
+        crate::event::ExecutionMode::Recovery => "recovery",
+        crate::event::ExecutionMode::Scheduled => "scheduled",
+        crate::event::ExecutionMode::Manual => "manual",
     }
 }
 

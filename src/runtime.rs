@@ -4,6 +4,7 @@ use crate::host_api::HostApi;
 use crate::host_api::MlServerTransport;
 use crate::ingress::IngressPipeline;
 use crate::moderation::ModerationEngine;
+use crate::reputation::ReputationClient;
 use crate::router::ExecutionRouter;
 use crate::scheduler::Scheduler;
 use crate::script::ScriptRunner;
@@ -62,6 +63,16 @@ impl Runtime {
 
         let schema_version = storage_bootstrap.migration().current_version;
         let moderation_storage = storage_bootstrap.into_connection();
+
+        // Прогрев кэша репутации
+        if let Some(reputation) = self.services.reputation_client.as_ref() {
+            if let Err(err) = reputation.warm_cache(1000).await {
+                tracing::warn!(error = %err, "failed to warm reputation cache");
+            } else {
+                tracing::info!("reputation cache warmed successfully");
+            }
+        }
+
         let host_api_storage = self
             .services
             .storage
@@ -102,10 +113,17 @@ impl Runtime {
             .with_storage(host_api_storage)
             .with_unit_registry_handle(registry_handle.clone())
             .with_ml_server_transport(self.services.ml_server_transport.clone());
-        let moderation = ModerationEngine::new(moderation_storage, self.services.telegram.clone())
-            .with_unit_registry_handle(registry_handle.clone())
-            .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
-            .without_processed_update_guard();
+
+        let mut moderation =
+            ModerationEngine::new(moderation_storage, self.services.telegram.clone())
+                .with_unit_registry_handle(registry_handle.clone())
+                .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
+                .without_processed_update_guard();
+
+        if let Some(reputation) = self.services.reputation_client.clone() {
+            moderation = moderation.with_reputation_client(reputation);
+        }
+
         let script_host_api = HostApi::new(false)
             .with_storage(script_storage)
             .with_unit_registry_handle(registry_handle.clone())
@@ -386,11 +404,21 @@ struct RuntimeServices {
     telegram: TelegramGateway,
     polling_bot: Option<teloxide_core::Bot>,
     ml_server_transport: MlServerTransport,
+    reputation_client: Option<Rc<ReputationClient>>,
     config: Rc<AppConfig>,
 }
 
 impl RuntimeServices {
     fn from_config(config: &AppConfig) -> Result<Self> {
+        let reputation_client = if config.reputation.enabled {
+            Some(Rc::new(ReputationClient::new(
+                config.reputation.base_url.clone(),
+                "bot".to_owned(), // TODO: Get real bot ID/name
+            )))
+        } else {
+            None
+        };
+
         Ok(Self {
             storage: Storage::with_config(
                 config.paths.database_path.clone(),
@@ -415,6 +443,7 @@ impl RuntimeServices {
                 (true, Some(token)) => Some(teloxide_core::Bot::new(token.to_owned())),
                 _ => None,
             },
+            reputation_client,
             config: Rc::new(config.clone()),
         })
     }
