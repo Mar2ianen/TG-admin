@@ -112,6 +112,23 @@ impl TelegramTransport for RecordingTransport {
                     text: request.text,
                 })
             }
+            TelegramRequest::GetChatAdministrators(request) => {
+                TelegramResult::ChatAdministrators(crate::tg::TelegramChatAdministratorsResult {
+                    chat_id: request.chat_id,
+                    administrators: Vec::new(),
+                })
+            }
+            TelegramRequest::GetChatMember(request) => {
+                TelegramResult::ChatMember(crate::tg::TelegramChatMemberResult {
+                    chat_id: request.chat_id,
+                    user_id: request.user_id,
+                    member: crate::tg::TelegramChatMember {
+                        user_id: request.user_id,
+                        is_admin: false,
+                        can_restrict_members: None,
+                    },
+                })
+            }
         })
     }
 }
@@ -200,6 +217,9 @@ where
         .bootstrap()
         .expect("bootstrap")
         .into_connection();
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let transport = RecordingTransport {
         requests: Arc::clone(&requests),
@@ -221,6 +241,9 @@ fn engine_without_registry() -> (
         .bootstrap()
         .expect("bootstrap")
         .into_connection();
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let transport = RecordingTransport {
         requests: Arc::clone(&requests),

@@ -18,7 +18,7 @@ use crate::tg::{
 };
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, Duration as ChronoDuration, Timelike, Utc};
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
@@ -63,6 +63,8 @@ impl Runtime {
 
         let schema_version = storage_bootstrap.migration().current_version;
         let moderation_storage = storage_bootstrap.into_connection();
+        self.recover_stale_scheduler_jobs(&moderation_storage)
+            .context("failed to recover stale scheduler jobs during runtime startup")?;
 
         // Прогрев кэша репутации
         if let Some(reputation) = self.services.reputation_client.as_ref() {
@@ -98,6 +100,18 @@ impl Runtime {
         );
 
         Ok(RuntimeBootstrapInfo { schema_version })
+    }
+
+    fn recover_stale_scheduler_jobs(&self, storage: &StorageConnection) -> Result<usize> {
+        let recovery_now = Utc::now();
+        let stale_before = recovery_now
+            - ChronoDuration::milliseconds(
+                self.services.config.scheduler.max_scheduler_lag_ms as i64,
+            );
+
+        Ok(storage
+            .recover_stale_processing_jobs(&stale_before.to_rfc3339(), &recovery_now.to_rfc3339())
+            .context("scheduler: failed to recover stale processing jobs")?)
     }
 
     fn compose_execution(
@@ -228,6 +242,13 @@ impl Runtime {
             .init()
             .context("scheduler: failed to open storage connection")?;
 
+        let recovered = self
+            .recover_stale_scheduler_jobs(&storage)
+            .context("scheduler: failed to recover stale processing jobs")?;
+        if recovered > 0 {
+            tracing::info!(recovered, "scheduler: recovered stale processing jobs");
+        }
+
         let now = Utc::now().to_rfc3339();
         let limit = self.services.scheduler.max_concurrent_jobs();
         let due_jobs = storage
@@ -236,10 +257,14 @@ impl Runtime {
 
         for job in &due_jobs {
             let claimed_at = Utc::now().to_rfc3339();
-            if let Err(err) =
-                storage.update_job_status(&job.job_id, "processing", None, &claimed_at)
-            {
-                tracing::warn!(job_id = %job.job_id, error = %err, "scheduler: failed to claim job");
+            let claimed = storage
+                .claim_job(&job.job_id, &claimed_at)
+                .context("scheduler: failed to claim job")?;
+            if !claimed {
+                tracing::warn!(
+                    job_id = %job.job_id,
+                    "scheduler: skipped job claim because status changed"
+                );
                 continue;
             }
 
@@ -420,22 +445,26 @@ impl RuntimeServices {
         } else {
             None
         };
+        let storage = Storage::with_config(
+            config.paths.database_path.clone(),
+            config.runtime_storage_config()?,
+        );
+        let telegram = match config.telegram.bot_token.as_deref() {
+            Some(token) => TelegramGateway::new(config.telegram.polling)
+                .with_idempotency_storage(storage.clone())
+                .with_transport(TeloxideCoreTransport::new(token.to_owned())),
+            None => TelegramGateway::new(config.telegram.polling)
+                .with_idempotency_storage(storage.clone()),
+        };
 
         Ok(Self {
-            storage: Storage::with_config(
-                config.paths.database_path.clone(),
-                config.runtime_storage_config()?,
-            ),
+            storage,
             audit: AuditService::new(true),
             scheduler: Scheduler::new(
                 config.scheduler.tick_interval_ms,
                 config.scheduler.max_concurrent_jobs,
             ),
-            telegram: match config.telegram.bot_token.as_deref() {
-                Some(token) => TelegramGateway::new(config.telegram.polling)
-                    .with_transport(TeloxideCoreTransport::new(token.to_owned())),
-                None => TelegramGateway::new(config.telegram.polling),
-            },
+            telegram,
             ml_server_transport: MlServerTransport::new(config.ml_server.base_url.clone())
                 .context("failed to configure ml server transport")?,
             polling_bot: match (

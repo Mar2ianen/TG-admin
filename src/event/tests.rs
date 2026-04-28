@@ -1,7 +1,7 @@
 use super::{
     CallbackContext, ChatContext, CommandSource, EventContext, EventNormalizationError,
-    EventNormalizer, ExecutionMode, ManualInvocationInput, MessageContentKind, MessageContext,
-    ReplyContext, ScheduledJobInput, SenderContext, SystemContext, SystemOrigin,
+    EventNormalizer, ExecutionMode, ManualInvocationInput, MemberContext, MessageContentKind,
+    MessageContext, ReplyContext, ScheduledJobInput, SenderContext, SystemContext, SystemOrigin,
     TelegramUpdateInput, UnitContext, UpdateType,
 };
 use chrono::{TimeZone, Utc};
@@ -177,12 +177,16 @@ fn manual_normalization_snapshot_shape_stays_stable() {
     "type": "supergroup",
     "title": "Moderation HQ",
     "username": "mod_hq",
+    "photo_file_id": null,
     "thread_id": 11
   },
   "sender": {
     "id": 42,
     "username": "admin",
     "display_name": "Admin",
+    "first_name": "Admin",
+    "last_name": null,
+    "photo_file_id": null,
     "is_bot": false,
     "is_admin": true,
     "role": "owner"
@@ -200,6 +204,8 @@ fn manual_normalization_snapshot_shape_stays_stable() {
   },
   "reply": null,
   "callback": null,
+  "chat_member": null,
+  "reaction": null,
   "job": null,
   "system": {
     "locale": "ru",
@@ -460,7 +466,11 @@ fn chat_member_updates_normalize_without_message_or_callback_context() {
         message: None,
         reply: None,
         callback: None,
-        chat_member: None,
+        chat_member: Some(MemberContext {
+            old_status: "member".to_owned(),
+            new_status: "kicked".to_owned(),
+            user: sender(),
+        }),
         reaction: None,
         locale: Some("en".to_owned()),
         trace_id: None,

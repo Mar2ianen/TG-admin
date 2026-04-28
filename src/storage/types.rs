@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 pub const PROCESSED_UPDATE_STATUS_PENDING: &str = "pending";
 pub const PROCESSED_UPDATE_STATUS_COMPLETED: &str = "completed";
+pub const EXTERNAL_EFFECT_STATUS_IN_PROGRESS: &str = "in_progress";
+pub const EXTERNAL_EFFECT_STATUS_COMPLETED: &str = "completed";
+pub const EXTERNAL_EFFECT_STATUS_ERROR: &str = "error";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserRecord {
@@ -114,4 +117,22 @@ pub struct AuditLogEntry {
     pub args_json: String,
     pub result_json: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalEffectRecord {
+    pub idempotency_key: String,
+    pub operation: String,
+    pub request_json: String,
+    pub result_json: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub error_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExternalEffectReservation {
+    Inserted(ExternalEffectRecord),
+    Existing(ExternalEffectRecord),
 }

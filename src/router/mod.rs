@@ -1,5 +1,7 @@
 mod classify;
 mod dispatch;
+#[cfg(test)]
+mod tests;
 mod types;
 
 pub use classify::*;
@@ -18,7 +20,7 @@ pub struct ExecutionRouter {
     index: RefCell<RouterIndex>,
     registry: RefCell<Option<Rc<UnitRegistry>>>,
     moderation: Option<ModerationEngine>,
-    script_runner: Option<crate::script::ScriptRunner>,
+    script_executor: Option<ScriptExecutor>,
     gateway: Option<std::sync::Arc<crate::tg::TelegramGateway>>,
     storage: Option<crate::storage::Storage>,
     bot_id: i64,
@@ -31,7 +33,7 @@ impl ExecutionRouter {
             index: RefCell::new(RouterIndex::new()),
             registry: RefCell::new(None),
             moderation: None,
-            script_runner: None,
+            script_executor: None,
             gateway: None,
             storage: None,
             bot_id,
@@ -69,9 +71,9 @@ impl ExecutionRouter {
     pub fn with_script_runner(
         mut self,
         runner: crate::script::ScriptRunner,
-        _host_api: crate::host_api::HostApi,
+        host_api: crate::host_api::HostApi,
     ) -> Self {
-        self.script_runner = Some(runner);
+        self.script_executor = Some(ScriptExecutor { runner, host_api });
         self
     }
 
@@ -179,7 +181,18 @@ impl ExecutionRouter {
             }
         }
 
-        if plan.lanes.contains(&ExecutionLane::UnitDispatch) {
+        if plan.lanes.contains(&ExecutionLane::UnitDispatch) || !invocations.is_empty() {
+            if let Some(script_executor) = self.script_executor.as_ref() {
+                for invocation in &invocations {
+                    script_executor.runner.execute(
+                        &invocation.exec_start,
+                        invocation.entry_point.as_deref(),
+                        event,
+                        &script_executor.host_api,
+                    )?;
+                }
+            }
+
             return Ok(ExecutionOutcome::UnitDispatch { plan, invocations });
         }
 
@@ -188,9 +201,16 @@ impl ExecutionRouter {
 }
 
 #[derive(Debug, Clone)]
+struct ScriptExecutor {
+    runner: crate::script::ScriptRunner,
+    host_api: crate::host_api::HostApi,
+}
+
+#[derive(Debug, Clone)]
 pub struct RouterIndex {
     command_index: HashMap<String, Vec<ExecutionLane>>,
     event_type_index: HashMap<crate::unit::UnitEventType, Vec<ExecutionLane>>,
+    trait_route_count: usize,
 }
 
 impl RouterIndex {
@@ -202,6 +222,7 @@ impl RouterIndex {
         Self {
             command_index,
             event_type_index: HashMap::new(),
+            trait_route_count: 0,
         }
     }
 
@@ -227,9 +248,11 @@ impl RouterIndex {
                                 .or_insert_with(Vec::new)
                                 .push(ExecutionLane::UnitDispatch);
                         }
+                        index.trait_route_count += 1;
                     }
                     crate::unit::TriggerSpec::Regex { .. } => {
                         // Regex triggers are not yet supported in indexed routing.
+                        index.trait_route_count += 1;
                     }
                 }
             }
@@ -245,12 +268,28 @@ impl RouterIndex {
         RouterIndexStats {
             command_routes: self.command_index.len(),
             ingress_routes: self.event_type_index.len(),
+            trait_routes: self.trait_route_count,
             ..RouterIndexStats::default()
         }
     }
 
     pub fn plan(&self, classified: ClassifiedEvent) -> RoutePlan {
         let mut lanes = Vec::new();
+        let mut matched_buckets = vec![
+            RouteBucket::IngressClass(classified.ingress_class),
+            RouteBucket::ChatScope(classified.chat_scope),
+            RouteBucket::AuthorKind(classified.author_kind),
+        ];
+        matched_buckets.extend(
+            classified
+                .traits
+                .iter()
+                .copied()
+                .map(RouteBucket::EventTrait),
+        );
+        if let Some(command_name) = &classified.command_name {
+            matched_buckets.push(RouteBucket::CommandIndex(command_name.clone()));
+        }
         if let Some(cmd) = &classified.command_name {
             if let Some(mapped_lanes) = self.command_index.get(cmd) {
                 lanes.extend(mapped_lanes);
@@ -266,7 +305,7 @@ impl RouterIndex {
 
         RoutePlan {
             classified,
-            matched_buckets: Vec::new(),
+            matched_buckets,
             lanes,
         }
     }
@@ -297,6 +336,8 @@ pub struct RouterIndexStats {
 pub enum RoutingError {
     #[error("moderation error: {0}")]
     Moderation(#[from] crate::moderation::ModerationError),
+    #[error("script error: {0}")]
+    Script(#[from] crate::script::ScriptError),
     #[error("missing lane executor")]
     MissingLaneExecutor { lane: ExecutionLane },
 }

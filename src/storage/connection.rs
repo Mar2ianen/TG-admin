@@ -90,6 +90,14 @@ impl StorageConnection {
             self.apply_migration_v3()?;
             applied_versions.push(3);
         }
+        if current_version < 4 {
+            self.apply_migration_v4()?;
+            applied_versions.push(4);
+        }
+        if current_version < 5 {
+            self.apply_migration_v5()?;
+            applied_versions.push(5);
+        }
 
         let final_version = self.current_schema_version()?;
 
@@ -148,6 +156,28 @@ impl StorageConnection {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         tx.execute_batch(MIGRATION_V3_SQL)?;
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    fn apply_migration_v4(&mut self) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        tx.execute_batch(MIGRATION_V4_SQL)?;
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    fn apply_migration_v5(&mut self) -> Result<(), StorageError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        tx.execute_batch(MIGRATION_V5_SQL)?;
         tx.commit()?;
 
         Ok(())
@@ -452,8 +482,29 @@ impl StorageConnection {
             .map_err(StorageError::from)
     }
 
-    pub fn insert_job(&self, job: &JobRecord) -> Result<(), StorageError> {
-        self.connection.execute(
+    fn get_job_by_dedupe_key(&self, dedupe_key: &str) -> Result<Option<JobRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT job_id, executor_unit, run_at, scheduled_at, status, dedupe_key,
+                    payload_json, retry_count, max_retries, last_error_code,
+                    last_error_text, audit_action_id, created_at, updated_at
+             FROM jobs
+             WHERE dedupe_key = ?1",
+        )?;
+
+        statement
+            .query_row(params![dedupe_key], map_job_row)
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn insert_job(&self, job: &JobRecord) -> Result<JobRecord, StorageError> {
+        if let Some(dedupe_key) = job.dedupe_key.as_deref() {
+            if let Some(existing) = self.get_job_by_dedupe_key(dedupe_key)? {
+                return Ok(existing);
+            }
+        }
+
+        match self.connection.execute(
             "INSERT INTO jobs (
                  job_id, executor_unit, run_at, scheduled_at, status, dedupe_key,
                  payload_json, retry_count, max_retries, last_error_code,
@@ -476,9 +527,18 @@ impl StorageConnection {
                 job.created_at,
                 job.updated_at,
             ],
-        )?;
+        ) {
+            Ok(_) => Ok(job.clone()),
+            Err(error) => {
+                if let Some(dedupe_key) = job.dedupe_key.as_deref() {
+                    if let Some(existing) = self.get_job_by_dedupe_key(dedupe_key)? {
+                        return Ok(existing);
+                    }
+                }
 
-        Ok(())
+                Err(error.into())
+            }
+        }
     }
 
     pub fn poll_due_jobs(&self, now: &str, limit: usize) -> Result<Vec<JobRecord>, StorageError> {
@@ -511,6 +571,35 @@ impl StorageConnection {
             params![job_id, status, error_text, now],
         )?;
         Ok(())
+    }
+
+    pub fn claim_job(&self, job_id: &str, claimed_at: &str) -> Result<bool, StorageError> {
+        let rows_affected = self.connection.execute(
+            "UPDATE jobs
+             SET status = 'processing', updated_at = ?2
+             WHERE job_id = ?1 AND status = 'scheduled'",
+            params![job_id, claimed_at],
+        )?;
+
+        Ok(rows_affected > 0)
+    }
+
+    pub fn recover_stale_processing_jobs(
+        &self,
+        stale_before: &str,
+        recovered_at: &str,
+    ) -> Result<usize, StorageError> {
+        let rows_affected = self.connection.execute(
+            "UPDATE jobs
+             SET status = 'scheduled',
+                 retry_count = retry_count + 1,
+                 updated_at = ?2
+             WHERE status = 'processing'
+               AND updated_at <= ?1",
+            params![stale_before, recovered_at],
+        )?;
+
+        Ok(rows_affected)
     }
 
     pub fn get_audit_entry(&self, action_id: &str) -> Result<Option<AuditLogEntry>, StorageError> {
@@ -626,6 +715,108 @@ impl StorageConnection {
         )?;
 
         Ok(())
+    }
+
+    pub fn get_external_effect(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<ExternalEffectRecord>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT idempotency_key, operation, request_json, result_json, status,
+                    created_at, updated_at, error_json
+             FROM external_effects
+             WHERE idempotency_key = ?1",
+        )?;
+
+        statement
+            .query_row(params![idempotency_key], map_external_effect_row)
+            .optional()
+            .map_err(StorageError::from)
+    }
+
+    pub fn reserve_external_effect(
+        &self,
+        entry: &ExternalEffectRecord,
+    ) -> Result<ExternalEffectReservation, StorageError> {
+        let rows_affected = self.connection.execute(
+            "INSERT INTO external_effects (
+                 idempotency_key, operation, request_json, result_json, status,
+                 created_at, updated_at, error_json
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(idempotency_key) DO NOTHING",
+            params![
+                &entry.idempotency_key,
+                &entry.operation,
+                &entry.request_json,
+                entry.result_json.as_deref(),
+                &entry.status,
+                &entry.created_at,
+                &entry.updated_at,
+                entry.error_json.as_deref(),
+            ],
+        )?;
+
+        let effect = self
+            .get_external_effect(&entry.idempotency_key)?
+            .ok_or(StorageError::MissingRow("external_effects"))?;
+
+        if rows_affected > 0 {
+            Ok(ExternalEffectReservation::Inserted(effect))
+        } else {
+            Ok(ExternalEffectReservation::Existing(effect))
+        }
+    }
+
+    pub fn complete_external_effect(
+        &self,
+        idempotency_key: &str,
+        result_json: &str,
+        updated_at: &str,
+    ) -> Result<bool, StorageError> {
+        let rows_affected = self.connection.execute(
+            "UPDATE external_effects
+             SET result_json = ?2,
+                 error_json = NULL,
+                 status = ?3,
+                 updated_at = ?4
+             WHERE idempotency_key = ?1
+               AND status = ?5",
+            params![
+                idempotency_key,
+                result_json,
+                EXTERNAL_EFFECT_STATUS_COMPLETED,
+                updated_at,
+                EXTERNAL_EFFECT_STATUS_IN_PROGRESS,
+            ],
+        )?;
+
+        Ok(rows_affected > 0)
+    }
+
+    pub fn fail_external_effect(
+        &self,
+        idempotency_key: &str,
+        error_json: &str,
+        updated_at: &str,
+    ) -> Result<bool, StorageError> {
+        let rows_affected = self.connection.execute(
+            "UPDATE external_effects
+             SET error_json = ?2,
+                 status = ?3,
+                 updated_at = ?4
+             WHERE idempotency_key = ?1
+               AND status = ?5",
+            params![
+                idempotency_key,
+                error_json,
+                EXTERNAL_EFFECT_STATUS_ERROR,
+                updated_at,
+                EXTERNAL_EFFECT_STATUS_IN_PROGRESS,
+            ],
+        )?;
+
+        Ok(rows_affected > 0)
     }
 
     pub fn increment_message_counters(

@@ -1,4 +1,4 @@
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 pub const MIGRATION_V1_SQL: &str = "
 CREATE TABLE IF NOT EXISTS schema_bootstrap (
@@ -134,4 +134,27 @@ CREATE TABLE IF NOT EXISTS counter_history (
 );
 
 PRAGMA user_version = 3;
+";
+
+pub const MIGRATION_V4_SQL: &str = "
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedupe_key
+ON jobs(dedupe_key)
+WHERE dedupe_key IS NOT NULL;
+
+PRAGMA user_version = 4;
+";
+
+pub const MIGRATION_V5_SQL: &str = "
+CREATE TABLE IF NOT EXISTS external_effects (
+  idempotency_key TEXT PRIMARY KEY,
+  operation TEXT NOT NULL,
+  request_json TEXT NOT NULL,
+  result_json TEXT,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  error_json TEXT
+);
+
+PRAGMA user_version = 5;
 ";

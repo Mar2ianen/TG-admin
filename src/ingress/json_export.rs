@@ -1,6 +1,6 @@
 use crate::event::{
-    ChatContext, EventContext, EventNormalizer, MessageContentKind, MessageContext, ReplyContext,
-    SenderContext, TelegramUpdateInput, UpdateType,
+    ChatContext, EventContext, EventNormalizer, MemberContext, MessageContentKind, MessageContext,
+    ReplyContext, SenderContext, TelegramUpdateInput, UpdateType,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -124,6 +124,16 @@ impl JsonExportAdapter {
             None
         };
 
+        let chat_member = if update_type == UpdateType::ChatMember {
+            Some(MemberContext {
+                old_status: "Left".to_owned(),
+                new_status: "Member".to_owned(),
+                user: sender.clone(),
+            })
+        } else {
+            None
+        };
+
         Some(TelegramUpdateInput {
             event_id: Some(format!("json_{}", msg.id)),
             update_id: msg.id as u64,
@@ -135,7 +145,7 @@ impl JsonExportAdapter {
             message,
             reply: None, // We don't have enough info for full ReplyContext easily here
             callback: None,
-            chat_member: None,
+            chat_member,
             reaction: None,
             locale: None,
             trace_id: None,

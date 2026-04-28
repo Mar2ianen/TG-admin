@@ -68,7 +68,7 @@ fn bootstrap_initializes_schema_version_once() {
         bootstrap.migration().current_version,
         crate::storage::CURRENT_SCHEMA_VERSION
     );
-    assert_eq!(bootstrap.migration().applied_versions, vec![1, 2, 3]);
+    assert_eq!(bootstrap.migration().applied_versions, vec![1, 2, 3, 4, 5]);
     assert!(bootstrap.migration().changed());
 
     let row_count: u32 = bootstrap
@@ -89,12 +89,14 @@ fn bootstrap_initializes_schema_version_once() {
     assert!(tables.contains("message_journal"));
     assert!(tables.contains("jobs"));
     assert!(tables.contains("audit_log"));
+    assert!(tables.contains("external_effects"));
     assert!(tables.contains("processed_updates"));
 
     let indexes = sqlite_objects(bootstrap.connection().connection(), "index");
     assert!(indexes.contains("idx_msg_chat_date"));
     assert!(indexes.contains("idx_msg_chat_user_date"));
     assert!(indexes.contains("idx_msg_chat_reply"));
+    assert!(indexes.contains("idx_jobs_dedupe_key"));
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -133,6 +135,12 @@ fn bootstrap_is_idempotent_after_initialization() {
             String::from("idx_msg_chat_reply"),
             String::from("idx_msg_chat_user_date"),
         ])
+    );
+
+    let job_indexes = index_names_for_table(second.connection().connection(), "jobs");
+    assert_eq!(
+        job_indexes,
+        BTreeSet::from([String::from("idx_jobs_dedupe_key")])
     );
     fs::remove_dir_all(dir).unwrap();
 }
@@ -248,6 +256,19 @@ fn bootstrap_preserves_required_table_shapes() {
             "args_json",
             "result_json",
             "created_at",
+        ]
+    );
+    assert_eq!(
+        table_column_names(connection, "external_effects"),
+        vec![
+            "idempotency_key",
+            "operation",
+            "request_json",
+            "result_json",
+            "status",
+            "created_at",
+            "updated_at",
+            "error_json",
         ]
     );
     assert_eq!(
@@ -444,7 +465,7 @@ fn migration_v2_backfills_processed_update_status_for_existing_rows() {
         migrated.migration().current_version,
         crate::storage::CURRENT_SCHEMA_VERSION
     );
-    assert_eq!(migrated.migration().applied_versions, vec![2, 3]);
+    assert_eq!(migrated.migration().applied_versions, vec![2, 3, 4, 5]);
     assert_eq!(
         loaded,
         Some(crate::storage::ProcessedUpdateRecord {
@@ -487,6 +508,112 @@ fn jobs_preserve_dedupe_keys_and_payloads() {
         .unwrap_or_else(|error| panic!("failed to load job: {error}"));
 
     assert_eq!(loaded, Some(job));
+}
+
+#[test]
+fn jobs_dedupe_by_partial_unique_index() {
+    let storage = bootstrapped_storage();
+    let first = crate::storage::JobRecord {
+        job_id: String::from("job-dup-1"),
+        executor_unit: String::from("units.warn"),
+        run_at: String::from("2026-04-21T15:00:00Z"),
+        scheduled_at: String::from("2026-04-21T14:59:30Z"),
+        status: String::from("scheduled"),
+        dedupe_key: Some(String::from("mute:chat-1:user-9")),
+        payload_json: String::from("{\"reason\":\"first\"}"),
+        retry_count: 0,
+        max_retries: 3,
+        last_error_code: None,
+        last_error_text: None,
+        audit_action_id: Some(String::from("act-job-dup-1")),
+        created_at: String::from("2026-04-21T14:59:30Z"),
+        updated_at: String::from("2026-04-21T14:59:30Z"),
+    };
+    let second = crate::storage::JobRecord {
+        job_id: String::from("job-dup-2"),
+        payload_json: String::from("{\"reason\":\"second\"}"),
+        audit_action_id: Some(String::from("act-job-dup-2")),
+        ..first.clone()
+    };
+
+    let stored_first = storage
+        .insert_job(&first)
+        .unwrap_or_else(|error| panic!("failed to insert first job: {error}"));
+    let stored_second = storage
+        .insert_job(&second)
+        .unwrap_or_else(|error| panic!("failed to insert duplicate job: {error}"));
+
+    assert_eq!(stored_first, first);
+    assert_eq!(stored_second, first);
+    assert!(
+        storage
+            .get_job(&second.job_id)
+            .unwrap_or_else(|error| panic!("failed to load duplicate job: {error}"))
+            .is_none()
+    );
+}
+
+#[test]
+fn stale_processing_jobs_are_recovered_to_scheduled() {
+    let storage = bootstrapped_storage();
+    let stale = crate::storage::JobRecord {
+        job_id: String::from("job-stale"),
+        executor_unit: String::from("units.warn"),
+        run_at: String::from("2026-04-21T15:00:00Z"),
+        scheduled_at: String::from("2026-04-21T14:59:30Z"),
+        status: String::from("processing"),
+        dedupe_key: Some(String::from("mute:chat-2:user-9")),
+        payload_json: String::from("{\"reason\":\"stale\"}"),
+        retry_count: 1,
+        max_retries: 3,
+        last_error_code: None,
+        last_error_text: None,
+        audit_action_id: Some(String::from("act-job-stale")),
+        created_at: String::from("2026-04-21T14:59:30Z"),
+        updated_at: String::from("2026-04-21T14:59:30Z"),
+    };
+    let fresh = crate::storage::JobRecord {
+        job_id: String::from("job-fresh"),
+        executor_unit: String::from("units.warn"),
+        run_at: String::from("2026-04-21T15:01:00Z"),
+        scheduled_at: String::from("2026-04-21T15:00:30Z"),
+        status: String::from("processing"),
+        dedupe_key: Some(String::from("mute:chat-3:user-9")),
+        payload_json: String::from("{\"reason\":\"fresh\"}"),
+        retry_count: 0,
+        max_retries: 3,
+        last_error_code: None,
+        last_error_text: None,
+        audit_action_id: Some(String::from("act-job-fresh")),
+        created_at: String::from("2026-04-21T15:00:30Z"),
+        updated_at: String::from("2026-04-21T15:00:30Z"),
+    };
+
+    storage
+        .insert_job(&stale)
+        .unwrap_or_else(|error| panic!("failed to insert stale job: {error}"));
+    storage
+        .insert_job(&fresh)
+        .unwrap_or_else(|error| panic!("failed to insert fresh job: {error}"));
+
+    let recovered = storage
+        .recover_stale_processing_jobs("2026-04-21T15:00:00Z", "2026-04-21T15:05:00Z")
+        .unwrap_or_else(|error| panic!("failed to recover stale jobs: {error}"));
+    let recovered_job = storage
+        .get_job(&stale.job_id)
+        .unwrap_or_else(|error| panic!("failed to load recovered job: {error}"))
+        .expect("recovered job exists");
+    let fresh_job = storage
+        .get_job(&fresh.job_id)
+        .unwrap_or_else(|error| panic!("failed to load fresh job: {error}"))
+        .expect("fresh job exists");
+
+    assert_eq!(recovered, 1);
+    assert_eq!(recovered_job.status, "scheduled");
+    assert_eq!(recovered_job.retry_count, stale.retry_count + 1);
+    assert_eq!(recovered_job.updated_at, "2026-04-21T15:05:00Z");
+    assert_eq!(fresh_job.status, "processing");
+    assert_eq!(fresh_job.retry_count, fresh.retry_count);
 }
 
 #[test]
@@ -551,6 +678,52 @@ fn audit_log_accepts_reversible_and_non_reversible_actions() {
     assert_eq!(loaded_reversible, Some(reversible));
     assert_eq!(loaded_non_reversible, Some(non_reversible.clone()));
     assert_eq!(idempotent_match, vec![non_reversible]);
+}
+
+#[test]
+fn external_effects_preserve_request_result_and_status_transitions() {
+    let storage = bootstrapped_storage();
+    let reserved = crate::storage::ExternalEffectRecord {
+        idempotency_key: String::from("tg.delete:-100:77"),
+        operation: String::from("tg.delete"),
+        request_json: String::from("{\"op\":\"tg.delete\",\"chat_id\":-100,\"message_id\":77}"),
+        result_json: None,
+        status: String::from(crate::storage::EXTERNAL_EFFECT_STATUS_IN_PROGRESS),
+        created_at: String::from("2026-04-21T17:00:00Z"),
+        updated_at: String::from("2026-04-21T17:00:00Z"),
+        error_json: None,
+    };
+
+    let inserted = storage
+        .reserve_external_effect(&reserved)
+        .unwrap_or_else(|error| panic!("failed to reserve external effect: {error}"));
+    let completed = storage
+        .complete_external_effect(
+            &reserved.idempotency_key,
+            "{\"chat_id\":-100,\"message_id\":77}",
+            "2026-04-21T17:00:01Z",
+        )
+        .unwrap_or_else(|error| panic!("failed to complete external effect: {error}"));
+    let loaded = storage
+        .get_external_effect(&reserved.idempotency_key)
+        .unwrap_or_else(|error| panic!("failed to load external effect: {error}"))
+        .expect("external effect exists");
+
+    assert!(matches!(
+        inserted,
+        crate::storage::ExternalEffectReservation::Inserted(ref effect)
+            if effect == &reserved
+    ));
+    assert!(completed);
+    assert_eq!(
+        loaded.status,
+        crate::storage::EXTERNAL_EFFECT_STATUS_COMPLETED
+    );
+    assert_eq!(
+        loaded.result_json.as_deref(),
+        Some("{\"chat_id\":-100,\"message_id\":77}")
+    );
+    assert!(loaded.error_json.is_none());
 }
 
 fn bootstrapped_storage() -> StorageConnection {

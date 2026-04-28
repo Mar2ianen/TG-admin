@@ -96,6 +96,37 @@ fn job_schedule_after_persists_job_on_happy_path() {
 }
 
 #[test]
+fn job_schedule_after_returns_existing_job_for_duplicate_dedupe_key() {
+    let event = manual_event();
+    let (_dir, api) = storage_api_with_registry(&["job.schedule"], &[], false);
+    let request = JobScheduleAfterRequest {
+        delay: "2h".to_owned(),
+        executor_unit: "moderation.mute_release".to_owned(),
+        payload: json!({"kind":"host_op","op":"tg.send_ui"}),
+        dedupe_key: Some("mute:99887766".to_owned()),
+        max_retries: Some(2),
+        audit_action_id: Some("act_1".to_owned()),
+    };
+
+    let first = api
+        .job_schedule_after(&event, request.clone())
+        .expect("first job schedule succeeds");
+    let second = api
+        .job_schedule_after(&event, request)
+        .expect("duplicate job schedule succeeds");
+
+    assert_eq!(first.value.job, second.value.job);
+    assert_eq!(first.value.job.job_id, second.value.job.job_id);
+    assert_eq!(
+        api.storage(HostApiOperation::JobScheduleAfter)
+            .expect("storage")
+            .get_job(&first.value.job.job_id)
+            .expect("lookup succeeds"),
+        Some(first.value.job)
+    );
+}
+
+#[test]
 fn job_schedule_after_denies_when_capability_is_missing() {
     let event = manual_event();
     let (_dir, api) = storage_api_with_registry(&["audit.read"], &[], false);

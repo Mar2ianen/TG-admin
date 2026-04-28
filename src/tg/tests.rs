@@ -3,10 +3,12 @@ use super::{
     TelegramExecutionOptions, TelegramGateway, TelegramMessageResult, TelegramOperation,
     TelegramRequest, TelegramResult, TelegramTransport, TelegramUiResult,
 };
+use crate::storage::Storage;
 use async_trait::async_trait;
 use serde_json::{json, to_value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use uuid::Uuid;
 
 #[derive(Debug)]
 struct StaticTransport {
@@ -26,6 +28,27 @@ impl TelegramTransport for StaticTransport {
     ) -> Result<TelegramResult, super::TelegramError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.result.clone())
+    }
+}
+
+#[derive(Debug)]
+struct FailingTransport {
+    error: super::TelegramError,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TelegramTransport for FailingTransport {
+    fn name(&self) -> &'static str {
+        "failing"
+    }
+
+    async fn execute(
+        &self,
+        _request: TelegramRequest,
+    ) -> Result<TelegramResult, super::TelegramError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(self.error.clone())
     }
 }
 
@@ -216,6 +239,147 @@ async fn execute_checked_replays_cached_idempotent_result() {
 }
 
 #[tokio::test]
+async fn execute_checked_replays_persisted_result_after_gateway_recreate() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let storage = bootstrapped_storage();
+    let transport = StaticTransport {
+        result: TelegramResult::Delete(super::TelegramDeleteResult {
+            chat_id: -100,
+            deleted: vec![77, 78],
+            failed: Vec::new(),
+        }),
+        calls: Arc::clone(&calls),
+    };
+
+    let request = TelegramRequest::DeleteMany(TelegramDeleteManyRequest {
+        chat_id: -100,
+        message_ids: vec![77, 78],
+        idempotency_key: Some("del-window:-100:77-78".to_owned()),
+    });
+
+    let first_gateway = TelegramGateway::default()
+        .with_idempotency_storage(storage.clone())
+        .with_transport(transport);
+    let first = first_gateway
+        .execute_checked(request.clone(), TelegramExecutionOptions::default())
+        .await
+        .expect("first call succeeds");
+
+    let second_gateway = TelegramGateway::default()
+        .with_idempotency_storage(storage)
+        .with_transport(StaticTransport {
+            result: TelegramResult::Delete(super::TelegramDeleteResult {
+                chat_id: -100,
+                deleted: vec![1],
+                failed: Vec::new(),
+            }),
+            calls: Arc::clone(&calls),
+        });
+    let second = second_gateway
+        .execute_checked(request, TelegramExecutionOptions::default())
+        .await
+        .expect("replayed call succeeds");
+
+    assert!(!first.metadata.replayed);
+    assert!(second.metadata.replayed);
+    assert_eq!(first.result, second.result);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn execute_checked_fails_closed_for_in_progress_external_effect() {
+    let storage = bootstrapped_storage();
+    let request = TelegramRequest::DeleteMany(TelegramDeleteManyRequest {
+        chat_id: -100,
+        message_ids: vec![10, 11],
+        idempotency_key: Some("del-window:-100:10-11".to_owned()),
+    });
+    let now = "2026-04-21T17:30:00Z";
+    let connection = storage
+        .open()
+        .expect("failed to open storage for seeding external effect");
+    connection
+        .reserve_external_effect(&crate::storage::ExternalEffectRecord {
+            idempotency_key: String::from("del-window:-100:10-11"),
+            operation: String::from(TelegramOperation::DeleteMany.as_str()),
+            request_json: serde_json::to_string(&request).expect("request json serializes"),
+            result_json: None,
+            status: String::from(crate::storage::EXTERNAL_EFFECT_STATUS_IN_PROGRESS),
+            created_at: String::from(now),
+            updated_at: String::from(now),
+            error_json: None,
+        })
+        .expect("failed to seed in-progress external effect");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gateway = TelegramGateway::default()
+        .with_idempotency_storage(storage)
+        .with_transport(StaticTransport {
+            result: TelegramResult::Delete(super::TelegramDeleteResult {
+                chat_id: -100,
+                deleted: vec![10, 11],
+                failed: Vec::new(),
+            }),
+            calls: Arc::clone(&calls),
+        });
+
+    let error = gateway
+        .execute_checked(request, TelegramExecutionOptions::default())
+        .await
+        .expect_err("in-progress external effect must fail closed");
+
+    assert_eq!(error.kind, TelegramErrorKind::Conflict);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn execute_checked_fails_closed_after_transport_error_is_persisted() {
+    let storage = bootstrapped_storage();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let transport_error = super::TelegramError::new(
+        TelegramOperation::Delete,
+        TelegramErrorKind::TransportUnavailable,
+        "telegram transport down",
+    )
+    .with_retryable(true);
+
+    let gateway = TelegramGateway::default()
+        .with_idempotency_storage(storage.clone())
+        .with_transport(FailingTransport {
+            error: transport_error.clone(),
+            calls: Arc::clone(&calls),
+        });
+
+    let request = TelegramRequest::Delete(super::TelegramDeleteRequest {
+        chat_id: -100,
+        message_id: 77,
+        idempotency_key: Some("delete:-100:77".to_owned()),
+    });
+
+    let first_error = gateway
+        .execute_checked(request.clone(), TelegramExecutionOptions::default())
+        .await
+        .expect_err("transport error must be returned");
+    assert_eq!(first_error, transport_error);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let replay_gateway = TelegramGateway::default()
+        .with_idempotency_storage(storage)
+        .with_transport(FailingTransport {
+            error: transport_error,
+            calls: Arc::clone(&calls),
+        });
+
+    let replay_error = replay_gateway
+        .execute_checked(request, TelegramExecutionOptions::default())
+        .await
+        .expect_err("persisted transport error must fail closed");
+
+    assert_eq!(replay_error.kind, TelegramErrorKind::Conflict);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn execute_checked_validates_non_empty_message_text() {
     let gateway = TelegramGateway::default();
     let error = gateway
@@ -296,4 +460,15 @@ async fn execute_checked_live_rejects_zero_chat_id_before_transport() {
     assert_eq!(error.kind, TelegramErrorKind::Validation);
     assert_eq!(error.operation, TelegramOperation::SendMessage);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+fn bootstrapped_storage() -> Storage {
+    let dir = std::env::temp_dir().join(format!("teloxide_tg_test_{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("failed to create temp dir");
+    let storage = Storage::new(dir.join("runtime.sqlite3"));
+    let bootstrap = storage
+        .bootstrap()
+        .expect("failed to bootstrap test storage");
+    drop(bootstrap);
+    storage
 }

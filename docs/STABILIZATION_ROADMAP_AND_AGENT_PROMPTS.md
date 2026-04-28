@@ -251,8 +251,8 @@ Exit criteria:
 Scope:
 
 - добавить GitHub Actions workflow;
-- команды: fmt, clippy, test;
-- если текущий clippy слишком красный из-за warnings, сначала поставить `cargo check`/`cargo test`, а `clippy -D warnings` включить после cleanup.
+- команды: fmt, test;
+- clippy deferred until it is green locally.
 
 Основные файлы:
 

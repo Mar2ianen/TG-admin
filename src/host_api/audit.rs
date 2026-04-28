@@ -64,11 +64,13 @@ impl HostApi {
             updated_at: to_rfc3339(scheduled_at),
         };
 
-        if !self.dry_run {
+        let job = if self.dry_run {
+            job
+        } else {
             self.storage(HostApiOperation::JobScheduleAfter)?
                 .insert_job(&job)
-                .map_err(|source| storage_error(HostApiOperation::JobScheduleAfter, source))?;
-        }
+                .map_err(|source| storage_error(HostApiOperation::JobScheduleAfter, source))?
+        };
 
         Ok(self.response(
             HostApiOperation::JobScheduleAfter,

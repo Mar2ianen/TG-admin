@@ -3,7 +3,7 @@
 //! Scripts receive the current [`crate::event::EventContext`] as a Rhai map variable
 //! named `event`, and can call back into the runtime via registered bridge functions
 //! (`db_kv_get`, `db_kv_set`, `db_user_get_json`, `ctx_current_json`, `unit_log`,
-//! `unit_warn`).
+//! `unit_warn`, `ml_transcribe`, `tg_send_message`).
 //!
 //! The bridge uses thread-local storage to pass [`HostApi`] and [`EventContext`]
 //! references into sync Rhai closures. This is safe because the runtime uses
@@ -16,6 +16,7 @@ use crate::host_api::HostApi;
 use crate::host_api::contract::HostApiValue;
 use crate::host_api::contract::{
     DbKvGetRequest, DbKvSetRequest, DbUserGetRequest, HostApiRequest, MlTranscribeRequest,
+    TgSendMessageRequest,
 };
 use crate::host_api::ml::{
     MlChatCompletionsRequest, MlChatMessage, MlEmbedTextRequest, MlHealthRequest, MlModelsRequest,
@@ -364,6 +365,34 @@ fn build_engine(max_ops: u64) -> Engine {
         },
     );
 
+    // --- tg.send_message ---
+
+    /// Send a Telegram message.
+    ///
+    /// `chat_id`: target chat identifier.
+    /// `text`: plain text message body.
+    ///
+    /// Returns the sent message id, or `0` on error.
+    engine.register_fn("tg_send_message", |chat_id: i64, text: String| -> i64 {
+        with_bridge(|host_api: &crate::host_api::HostApi, event| {
+            let req = HostApiRequest::TgSendMessage(TgSendMessageRequest { chat_id, text });
+            match host_api.call(event, req) {
+                Ok(resp) => {
+                    if let HostApiValue::TgSendMessage(val) = resp.value {
+                        i64::from(val.message_id)
+                    } else {
+                        0
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "script bridge: tg_send_message failed");
+                    0
+                }
+            }
+        })
+        .unwrap_or(0)
+    });
+
     // --- ml.chat ---
 
     /// Send a chat completion request to the ML server.
@@ -486,3 +515,96 @@ impl std::fmt::Display for ScriptError {
 }
 
 impl std::error::Error for ScriptError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{EventContext, ExecutionMode};
+    use crate::host_api::HostApi;
+    use crate::storage::Storage;
+    use crate::unit::{
+        CapabilitiesSpec, ServiceSpec, TriggerSpec, UnitDefinition, UnitManifest, UnitRegistry,
+    };
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn test_event() -> EventContext {
+        EventContext::synthetic_for_unit(
+            "evt_script_runner",
+            ExecutionMode::Manual,
+            "moderation.test",
+        )
+    }
+
+    fn test_host_api(allow: &[&str]) -> (TempDir, HostApi) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_path = dir.path().join("host-api.sqlite3");
+        let storage = Storage::new(storage_path).init().expect("storage init");
+
+        let mut manifest = UnitManifest::new(
+            UnitDefinition::new("moderation.test"),
+            TriggerSpec::command(["warn"]),
+            ServiceSpec::new("cargo run"),
+        );
+        manifest.capabilities = CapabilitiesSpec {
+            allow: allow.iter().map(|value| (*value).to_owned()).collect(),
+            deny: Vec::new(),
+        };
+        let registry = UnitRegistry::load_manifests(vec![manifest]).registry;
+
+        let api = HostApi::new(true)
+            .with_storage(storage)
+            .with_unit_registry(registry);
+        (dir, api)
+    }
+
+    fn write_script(dir: &Path, name: &str, source: &str) -> String {
+        let script_path = dir.join(name);
+        std::fs::write(&script_path, source).expect("write script");
+        name.to_owned()
+    }
+
+    #[test]
+    fn script_runner_tg_send_message_bridge_uses_dry_run_host_api() {
+        let (dir, api) = test_host_api(&["tg.write_message"]);
+        let scripts_dir = dir.path().join("scripts");
+        std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        let runner = ScriptRunner::new(scripts_dir.clone());
+        let script_name = write_script(
+            scripts_dir.as_path(),
+            "send.rhai",
+            r#"
+                let message_id = tg_send_message(-100123, "hello from rhai");
+                if message_id != 1 {
+                    throw("unexpected message_id");
+                }
+            "#,
+        );
+
+        runner
+            .execute(&script_name, None, &test_event(), &api)
+            .expect("script executes");
+    }
+
+    #[test]
+    fn script_runner_ml_transcribe_bridge_uses_dry_run_host_api() {
+        let (dir, api) = test_host_api(&["ml.stt"]);
+        let scripts_dir = dir.path().join("scripts");
+        std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        let runner = ScriptRunner::new(scripts_dir.clone());
+        let script_name = write_script(
+            scripts_dir.as_path(),
+            "transcribe.rhai",
+            r#"
+                let transcript = ml_transcribe("", "voice-123");
+                if transcript != "transcribed text" {
+                    throw("unexpected transcript");
+                }
+            "#,
+        );
+
+        runner
+            .execute(&script_name, None, &test_event(), &api)
+            .expect("script executes");
+    }
+}

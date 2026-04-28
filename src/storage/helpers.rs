@@ -132,3 +132,16 @@ pub fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditLogEntry>
         created_at: row.get(16)?,
     })
 }
+
+pub fn map_external_effect_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExternalEffectRecord> {
+    Ok(ExternalEffectRecord {
+        idempotency_key: row.get(0)?,
+        operation: row.get(1)?,
+        request_json: row.get(2)?,
+        result_json: row.get(3)?,
+        status: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        error_json: row.get(7)?,
+    })
+}

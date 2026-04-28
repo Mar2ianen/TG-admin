@@ -590,11 +590,12 @@ impl ModerationEngine {
             created_at: now.clone(),
             updated_at: now,
         };
-        if !dry_run {
-            self.storage
-                .insert_job(&job)
-                .map_err(ModerationError::Storage)?;
+        if dry_run {
+            return Ok(job);
         }
-        Ok(job)
+
+        self.storage
+            .insert_job(&job)
+            .map_err(ModerationError::Storage)
     }
 }

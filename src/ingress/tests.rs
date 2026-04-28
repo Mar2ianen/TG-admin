@@ -195,6 +195,9 @@ fn moderation_pipeline_with_caps(
     let storage = Storage::new(dir.path().join("runtime.sqlite3"));
     let bootstrap = storage.bootstrap().expect("bootstrap");
     let moderation_storage = bootstrap.into_connection();
+    moderation_storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
     let ingress_storage = storage.init().expect("ingress storage");
     let inspect_storage = storage.init().expect("inspect storage");
     let requests = Arc::new(Mutex::new(Vec::new()));

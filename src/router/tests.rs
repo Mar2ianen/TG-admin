@@ -1,7 +1,7 @@
 use super::{
-    classify_event, AuthorKind, ChatScope, EventTrait, ExecutionLane, ExecutionOutcome,
-    ExecutionRouter, IngressClass, RouteBucket, RouterIndex, RoutingError, UnitDispatchInvocation,
-    UnitDispatchTrigger,
+    AuthorKind, ChatScope, EventTrait, ExecutionLane, ExecutionOutcome, ExecutionRouter,
+    IngressClass, RouteBucket, RouterIndex, UnitDispatchInvocation, UnitDispatchTrigger,
+    classify_event,
 };
 use crate::event::{
     CallbackContext, ChatContext, EventContext, EventNormalizer, ExecutionMode,
@@ -9,6 +9,7 @@ use crate::event::{
     SystemContext, TelegramUpdateInput, UnitContext, UpdateType,
 };
 use crate::moderation::{ModerationEngine, ModerationEventResult};
+use crate::script::ScriptRunner;
 use crate::storage::Storage;
 use crate::tg::TelegramGateway;
 use crate::unit::{
@@ -17,6 +18,7 @@ use crate::unit::{
 };
 use chrono::{TimeZone, Utc};
 use serde_json::json;
+use std::fs;
 use tempfile::tempdir;
 
 fn ts() -> chrono::DateTime<Utc> {
@@ -205,10 +207,11 @@ fn router_with_moderation() -> ExecutionRouter {
         .bootstrap()
         .expect("bootstrap")
         .into_connection();
-    let gateway = TelegramGateway::new(false);
-    let engine = ModerationEngine::new(storage, gateway)
-        .with_unit_registry(registry_with_caps(&[]))
-        .with_admin_user_ids([42]);
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
+    let gateway = TelegramGateway::new(true);
+    let engine = ModerationEngine::new(storage, gateway).with_admin_user_ids([42]);
     ExecutionRouter::new(0, false).with_moderation(engine)
 }
 
@@ -436,8 +439,8 @@ fn router_sync_registry_rebuilds_from_live_registry_state() {
         TriggerSpec::command(["audit"]),
         ServiceSpec::new("scripts/command/audit.rhai"),
     );
-    let router = ExecutionRouter::new(0, false)
-        .with_registry(registry_from_manifests(vec![stats_manifest]));
+    let router =
+        ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![stats_manifest]));
 
     assert!(
         router
@@ -566,7 +569,10 @@ async fn router_passes_explicit_unit_policy_to_built_in_moderation() {
         .bootstrap()
         .expect("bootstrap")
         .into_connection();
-    let gateway = TelegramGateway::new(false);
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
+    let gateway = TelegramGateway::new(true);
     let engine = ModerationEngine::new(storage, gateway)
         .with_unit_registry(registry.clone())
         .with_dry_run(true)
@@ -647,9 +653,8 @@ async fn router_dispatches_matching_command_units_with_service_envelope() {
         ServiceSpec::new("scripts/moderation/stats_audit.rhai"),
     );
     manifest.service.entry_point = Some("handle_stats".to_owned());
-    let router = ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![
-        manifest,
-    ]));
+    let router =
+        ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![manifest]));
 
     let outcome = router
         .route(&manual_event("/stats"))
@@ -670,6 +675,77 @@ async fn router_dispatches_matching_command_units_with_service_envelope() {
                 command: "stats".to_owned(),
             },
         }]
+    );
+}
+
+#[tokio::test]
+async fn router_executes_unit_dispatch_script_with_host_api() {
+    let scripts_dir = tempdir().expect("tempdir");
+    let script_path = scripts_dir
+        .path()
+        .join("scripts/moderation/stats_audit.rhai");
+    fs::create_dir_all(
+        script_path
+            .parent()
+            .expect("script path has a parent directory"),
+    )
+    .expect("create script directory");
+    fs::write(
+        &script_path,
+        r#"db_kv_set("chat", "-100123", "script.ran", "1");"#,
+    )
+    .expect("write script");
+
+    let storage_dir = tempdir().expect("tempdir");
+    let storage = Storage::new(storage_dir.path().join("host-api.sqlite3"))
+        .init()
+        .expect("storage init");
+    let host_api = crate::host_api::HostApi::new(false).with_storage(storage);
+    let router = ExecutionRouter::new(0, false)
+        .with_registry(registry_from_manifests(vec![UnitManifest::new(
+            UnitDefinition::new("moderation.stats.audit"),
+            TriggerSpec::command(["stats"]),
+            ServiceSpec::new("scripts/moderation/stats_audit.rhai"),
+        )]))
+        .with_script_runner(
+            ScriptRunner::new(scripts_dir.path().to_path_buf()),
+            host_api.clone(),
+        );
+
+    let outcome = router
+        .route(&manual_event("/stats"))
+        .await
+        .expect("routing succeeds");
+
+    let ExecutionOutcome::UnitDispatch { plan, invocations } = outcome else {
+        panic!("expected unit dispatch outcome");
+    };
+    assert_eq!(plan.lanes, vec![ExecutionLane::UnitDispatch]);
+    assert_eq!(
+        invocations,
+        vec![UnitDispatchInvocation {
+            unit_id: "moderation.stats.audit".to_owned(),
+            exec_start: "scripts/moderation/stats_audit.rhai".to_owned(),
+            entry_point: None,
+            trigger: UnitDispatchTrigger::Command {
+                command: "stats".to_owned(),
+            },
+        }]
+    );
+
+    let response = host_api
+        .db_kv_get(
+            &manual_event("/stats"),
+            crate::host_api::DbKvGetRequest {
+                scope_kind: "chat".to_owned(),
+                scope_id: "-100123".to_owned(),
+                key: "script.ran".to_owned(),
+            },
+        )
+        .expect("script wrote kv entry");
+    assert_eq!(
+        response.value.entry.map(|entry| entry.value_json),
+        Some("1".to_owned())
     );
 }
 
@@ -716,9 +792,8 @@ async fn router_dispatches_matching_event_type_units() {
         TriggerSpec::event_type([UnitEventType::CallbackQuery]),
         ServiceSpec::new("scripts/callback/resolve.rhai"),
     );
-    let router = ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![
-        manifest,
-    ]));
+    let router =
+        ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![manifest]));
 
     let outcome = router
         .route(&callback_event("resolve:123"))
@@ -742,22 +817,33 @@ async fn router_dispatches_matching_event_type_units() {
 }
 
 #[tokio::test]
-async fn router_reports_missing_executor_for_indexed_lane() {
-    let router = ExecutionRouter::new(0, false);
-    let mut event = manual_event("/warn @spam spam");
-    event.reply = Some(crate::event::ReplyContext {
-        message_id: 900,
-        sender_user_id: Some(99),
-        sender_username: Some("spam".to_owned()),
-        text: Some("spam".to_owned()),
-        has_media: false,
-    });
-    event.message = event.message.map(|message| message.with_reply(Some(900)));
+async fn router_preserves_unit_dispatch_outcome_without_script_runner() {
+    let router = ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![
+        UnitManifest::new(
+            UnitDefinition::new("moderation.stats.audit"),
+            TriggerSpec::command(["stats"]),
+            ServiceSpec::new("scripts/moderation/stats_audit.rhai"),
+        ),
+    ]));
 
-    let error = router
-        .route(&event)
+    let outcome = router
+        .route(&manual_event("/stats"))
         .await
-        .expect_err("missing executor must fail");
+        .expect("routing succeeds");
 
-    assert!(matches!(error, RoutingError::MissingLaneExecutor { .. }));
+    let ExecutionOutcome::UnitDispatch { plan, invocations } = outcome else {
+        panic!("expected deferred unit dispatch outcome");
+    };
+    assert_eq!(plan.lanes, vec![ExecutionLane::UnitDispatch]);
+    assert_eq!(
+        invocations,
+        vec![UnitDispatchInvocation {
+            unit_id: "moderation.stats.audit".to_owned(),
+            exec_start: "scripts/moderation/stats_audit.rhai".to_owned(),
+            entry_point: None,
+            trigger: UnitDispatchTrigger::Command {
+                command: "stats".to_owned(),
+            },
+        }]
+    );
 }
