@@ -12,8 +12,8 @@ use crate::parser::reason::{
 };
 use crate::storage::{AuditLogEntry, AuditLogFilter, JobRecord, UserPatch};
 use crate::tg::{
-    TelegramBanRequest, TelegramDeleteManyRequest, TelegramExecutionOptions, TelegramRequest,
-    TelegramRestrictRequest, TelegramSendMessageRequest,
+    TelegramBanRequest, TelegramExecutionOptions, TelegramRequest, TelegramRestrictRequest,
+    TelegramSendMessageRequest,
 };
 use chrono::{DateTime, Utc};
 use serde_json::json;

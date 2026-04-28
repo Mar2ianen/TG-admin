@@ -1,22 +1,22 @@
 use chrono::Duration as ChronoDuration;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::validation::{
-    MAX_JOB_DELAY_DAYS, duration_to_chrono, validate_audit_find_request, validate_event,
-    validate_job_schedule_request, validate_non_empty,
+    duration_to_chrono, validate_audit_find_request, validate_event, validate_job_schedule_request,
+    validate_non_empty, MAX_JOB_DELAY_DAYS,
 };
 use super::{
-    AuditCompensateRequest, AuditCompensateValue, AuditFindRequest, AuditFindValue, HostApi,
-    HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, JobScheduleAfterRequest,
-    JobScheduleAfterValue, execution_mode_label, storage_error, to_rfc3339,
+    execution_mode_label, storage_error, to_rfc3339, AuditCompensateRequest, AuditCompensateValue,
+    AuditFindRequest, AuditFindValue, HostApi, HostApiError, HostApiErrorDetail, HostApiOperation,
+    HostApiResponse, JobScheduleAfterRequest, JobScheduleAfterValue,
 };
 use crate::event::EventContext;
 use crate::parser::duration::parse_duration;
 use crate::storage::{AuditLogEntry, JobRecord};
 
 impl HostApi {
-    pub fn job_schedule_after(
+    pub(crate) fn job_schedule_after(
         &self,
         event: &EventContext,
         request: JobScheduleAfterRequest,
@@ -78,7 +78,7 @@ impl HostApi {
         ))
     }
 
-    pub fn audit_find(
+    pub(crate) fn audit_find(
         &self,
         event: &EventContext,
         request: AuditFindRequest,
@@ -95,7 +95,7 @@ impl HostApi {
         Ok(self.response(HostApiOperation::AuditFind, AuditFindValue { entries }))
     }
 
-    pub fn audit_compensate(
+    pub(crate) fn audit_compensate(
         &self,
         event: &EventContext,
         request: AuditCompensateRequest,

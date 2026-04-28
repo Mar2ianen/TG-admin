@@ -12,7 +12,6 @@
 
 use crate::event::EventContext;
 
-use crate::host_api::HostApi;
 use crate::host_api::contract::HostApiValue;
 use crate::host_api::contract::{
     DbKvGetRequest, DbKvSetRequest, DbUserGetRequest, HostApiRequest, MlTranscribeRequest,
@@ -21,6 +20,7 @@ use crate::host_api::contract::{
 use crate::host_api::ml::{
     MlChatCompletionsRequest, MlChatMessage, MlEmbedTextRequest, MlHealthRequest, MlModelsRequest,
 };
+use crate::host_api::HostApi;
 use crate::storage::KvEntry;
 use rhai::{Dynamic, Engine, Scope};
 use std::cell::RefCell;
@@ -95,7 +95,7 @@ pub struct ScriptRunner {
 }
 
 impl ScriptRunner {
-    pub fn new(scripts_dir: PathBuf) -> Self {
+    pub(crate) fn new(scripts_dir: PathBuf) -> Self {
         Self {
             scripts_dir,
             max_operations: 500_000,
@@ -109,7 +109,7 @@ impl ScriptRunner {
     ///   if no function with that name exists, falls back to running top-level code
     /// - `event`: current event context (passed as `event` variable in script scope)
     /// - `host_api`: HostApi instance for bridge callbacks
-    pub fn execute(
+    pub(crate) fn execute(
         &self,
         exec_start: &str,
         entry_point: Option<&str>,
@@ -154,6 +154,12 @@ impl ScriptRunner {
         } else {
             Err(ScriptError::EntryPointNotFound(entry.to_owned()))
         }
+    }
+}
+
+impl Default for ScriptRunner {
+    fn default() -> Self {
+        Self::new(PathBuf::new())
     }
 }
 
@@ -267,8 +273,8 @@ fn build_engine(max_ops: u64) -> Engine {
 
     // --- ml.health ---
 
-    /// Check ML server health. `base_url` can be empty string to use the configured default.
-    /// Returns JSON string of MlHealthValue, or empty string on error.
+    // Check ML server health. `base_url` can be empty string to use the configured default.
+    // Returns JSON string of MlHealthValue, or empty string on error.
     engine.register_fn("ml_health_json", |base_url: String| -> String {
         with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::MlHealth(MlHealthRequest {
@@ -291,7 +297,7 @@ fn build_engine(max_ops: u64) -> Engine {
 
     // --- ml.models ---
 
-    /// List available ML models. Returns JSON string of MlModelsValue.
+    // List available ML models. Returns JSON string of MlModelsValue.
     engine.register_fn("ml_models_json", |base_url: String| -> String {
         with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::MlModels(MlModelsRequest {
@@ -329,12 +335,12 @@ fn build_engine(max_ops: u64) -> Engine {
         .unwrap_or_default()
     });
 
-    /// Transcribe a voice file.
-    ///
-    /// `base_url`: ML server base URL.
-    /// `file_id`: file identifier.
-    ///
-    /// Returns the transcript string, or empty string on error.
+    // Transcribe a voice file.
+    //
+    // `base_url`: ML server base URL.
+    // `file_id`: file identifier.
+    //
+    // Returns the transcript string, or empty string on error.
     engine.register_fn(
         "ml_transcribe",
         |base_url: String, file_id: String| -> String {
@@ -367,12 +373,12 @@ fn build_engine(max_ops: u64) -> Engine {
 
     // --- tg.send_message ---
 
-    /// Send a Telegram message.
-    ///
-    /// `chat_id`: target chat identifier.
-    /// `text`: plain text message body.
-    ///
-    /// Returns the sent message id, or `0` on error.
+    // Send a Telegram message.
+    //
+    // `chat_id`: target chat identifier.
+    // `text`: plain text message body.
+    //
+    // Returns the sent message id, or `0` on error.
     engine.register_fn("tg_send_message", |chat_id: i64, text: String| -> i64 {
         with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::TgSendMessage(TgSendMessageRequest { chat_id, text });
@@ -395,12 +401,12 @@ fn build_engine(max_ops: u64) -> Engine {
 
     // --- ml.chat ---
 
-    /// Send a chat completion request to the ML server.
-    ///
-    /// `model`: model name (e.g. "llama3")
-    /// `messages`: Rhai array of maps, each with "role" and "content" keys.
-    ///
-    /// Returns the assistant's reply as a plain string, or empty string on error.
+    // Send a chat completion request to the ML server.
+    //
+    // `model`: model name (e.g. "llama3")
+    // `messages`: Rhai array of maps, each with "role" and "content" keys.
+    //
+    // Returns the assistant's reply as a plain string, or empty string on error.
     engine.register_fn(
         "ml_chat",
         |model: String, messages: rhai::Array| -> String {
@@ -446,12 +452,12 @@ fn build_engine(max_ops: u64) -> Engine {
 
     // --- ml.embed ---
 
-    /// Embed a single text string using the ML server.
-    ///
-    /// `model`: model name (e.g. "nomic-embed-text"), or empty string for server default.
-    /// `text`: the text to embed.
-    ///
-    /// Returns the embedding as a Rhai array of floats, or an empty array on error.
+    // Embed a single text string using the ML server.
+    //
+    // `model`: model name (e.g. "nomic-embed-text"), or empty string for server default.
+    // `text`: the text to embed.
+    //
+    // Returns the embedding as a Rhai array of floats, or an empty array on error.
     engine.register_fn("ml_embed", |model: String, text: String| -> rhai::Array {
         with_bridge(|host_api: &crate::host_api::HostApi, event| {
             let req = HostApiRequest::MlEmbedText(MlEmbedTextRequest {

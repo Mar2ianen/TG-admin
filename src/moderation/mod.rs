@@ -8,8 +8,9 @@ mod undo;
 
 use std::rc::Rc;
 
-pub use audit::*;
+#[allow(unused_imports)]
 pub use commands::*;
+#[allow(unused_imports)]
 pub use events::*;
 pub use helpers::*;
 pub use reactions::*;
@@ -296,7 +297,7 @@ impl ModerationEngine {
         event: &EventContext,
         err: ModerationError,
     ) -> Result<(), crate::tg::TelegramError> {
-        let (template_name, _context) = crate::moderation::reactions::error_to_template(&err);
+        let (_template_name, _context) = crate::moderation::reactions::error_to_template(&err);
 
         // Временная реализация: отправляем простой текст, так как полноценный UI шаблон требует HostApi
         let text = format!("Ошибка: {}", err);
@@ -321,15 +322,6 @@ impl ModerationEngine {
         spec: AuditEntrySpec<'_>,
     ) -> crate::storage::AuditLogEntry {
         audit::build_audit_entry(event, unit_policy, spec)
-    }
-}
-
-fn execution_mode_name(mode: crate::event::ExecutionMode) -> &'static str {
-    match mode {
-        crate::event::ExecutionMode::Realtime => "realtime",
-        crate::event::ExecutionMode::Recovery => "recovery",
-        crate::event::ExecutionMode::Scheduled => "scheduled",
-        crate::event::ExecutionMode::Manual => "manual",
     }
 }
 

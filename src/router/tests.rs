@@ -184,19 +184,6 @@ fn linked_channel_style_group_event() -> EventContext {
     event
 }
 
-fn registry_with_caps(caps: &[&str]) -> UnitRegistry {
-    let mut manifest = UnitManifest::new(
-        UnitDefinition::new("moderation.test"),
-        TriggerSpec::command(["warn", "mute", "ban", "del", "undo", "msg"]),
-        ServiceSpec::new("scripts/moderation/test.rhai"),
-    );
-    manifest.capabilities = CapabilitiesSpec {
-        allow: caps.iter().map(|value| (*value).to_owned()).collect(),
-        deny: Vec::new(),
-    };
-    UnitRegistry::load_manifests(vec![manifest]).registry
-}
-
 fn registry_from_manifests(manifests: Vec<UnitManifest>) -> UnitRegistry {
     UnitRegistry::load_manifests(manifests).registry
 }

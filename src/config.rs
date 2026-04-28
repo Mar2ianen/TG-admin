@@ -50,7 +50,7 @@ impl AppConfig {
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
         if !path.exists() {
-            return Ok(Self::default());
+            return Self::default().finalize_telegram_config();
         }
 
         let raw = fs::read_to_string(path)
@@ -58,6 +58,7 @@ impl AppConfig {
 
         toml::from_str(&raw)
             .with_context(|| format!("failed to parse config from {}", path.display()))
+            .and_then(Self::finalize_telegram_config)
     }
 
     pub fn load_required_from_path(path: &Path) -> Result<Self> {
@@ -66,6 +67,7 @@ impl AppConfig {
 
         toml::from_str(&raw)
             .with_context(|| format!("failed to parse config from {}", path.display()))
+            .and_then(Self::finalize_telegram_config)
     }
 
     pub fn runtime_storage_config(&self) -> Result<crate::storage::StorageConfig> {
@@ -79,6 +81,11 @@ impl AppConfig {
             temp_store: TempStoreMode::Memory,
             foreign_keys: true,
         })
+    }
+
+    fn finalize_telegram_config(mut self) -> Result<Self> {
+        self.telegram.bot_token = self.telegram.resolved_bot_token()?;
+        Ok(self)
     }
 }
 
@@ -148,6 +155,17 @@ impl Default for TelegramConfig {
             primary_chat_ids: Vec::new(),
             allowed_webhook_hosts: Vec::new(),
         }
+    }
+}
+
+impl TelegramConfig {
+    fn resolved_bot_token(&self) -> Result<Option<String>> {
+        let env_token = env::var("TMO_BOT_TOKEN").ok();
+        resolve_telegram_bot_token(
+            self.polling,
+            self.bot_token.as_deref(),
+            env_token.as_deref(),
+        )
     }
 }
 
@@ -354,22 +372,43 @@ impl Default for FeatureFlags {
     }
 }
 
+fn normalize_bot_token(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn resolve_telegram_bot_token(
+    polling: bool,
+    explicit_token: Option<&str>,
+    env_token: Option<&str>,
+) -> Result<Option<String>> {
+    let token = normalize_bot_token(explicit_token).or_else(|| normalize_bot_token(env_token));
+
+    if polling && token.is_none() {
+        anyhow::bail!(
+            "telegram.polling=true requires a non-empty bot token; set telegram.bot_token or TMO_BOT_TOKEN, or set telegram.polling=false for local/noop mode"
+        );
+    }
+
+    Ok(token)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AppConfig;
+    use super::{AppConfig, TelegramConfig, resolve_telegram_bot_token};
     use std::fs;
 
     #[test]
-    fn missing_config_path_uses_defaults() {
-        let base = std::env::temp_dir().join(format!(
-            "telegram-moderation-os-missing-{}",
-            std::process::id()
-        ));
-        let path = base.join("config.toml");
-        let config = AppConfig::load_from_path(&path).expect("default config");
+    fn polling_requires_non_empty_token_without_env_fallback() {
+        let error = resolve_telegram_bot_token(true, None, None)
+            .expect_err("default polling must fail closed");
 
-        assert!(config.telegram.polling);
-        assert_eq!(config.storage.sqlite_journal_mode, "WAL");
+        assert!(
+            error
+                .to_string()
+                .contains("telegram.polling=true requires a non-empty bot token")
+        );
     }
 
     #[test]
@@ -478,6 +517,10 @@ bloom_prefilter = false
         fs::create_dir_all(&base).expect("temp config dir");
         let path = base.join("config.toml");
         let body = r#"
+[telegram]
+bot_token = ""
+polling = false
+
 [observability]
 log_level = "warn"
 "#;
@@ -486,13 +529,48 @@ log_level = "warn"
         let config = AppConfig::load_from_path(&path).expect("parsed config");
 
         assert_eq!(config.observability.log_level, "warn");
-        assert!(config.telegram.polling);
+        assert!(!config.telegram.polling);
         assert_eq!(config.storage.sqlite_journal_mode, "WAL");
         assert_eq!(config.ml_server.base_url, "http://localhost:11434");
         assert!(config.observability.json_logs);
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn blank_token_is_rejected_when_polling_is_enabled() {
+        let config = TelegramConfig {
+            bot_token: Some("   ".to_owned()),
+            polling: true,
+            ..TelegramConfig::default()
+        };
+
+        let error = config
+            .resolved_bot_token()
+            .expect_err("blank token must fail closed");
+
+        assert!(
+            error
+                .to_string()
+                .contains("telegram.polling=true requires a non-empty bot token")
+        );
+    }
+
+    #[test]
+    fn env_token_can_satisfy_polling_startup_without_config_token() {
+        let resolved = resolve_telegram_bot_token(true, None, Some(" 123456:TEST_TOKEN "))
+            .expect("env token should satisfy polling startup");
+
+        assert_eq!(resolved.as_deref(), Some("123456:TEST_TOKEN"));
+    }
+
+    #[test]
+    fn polling_false_allows_missing_token() {
+        let resolved = resolve_telegram_bot_token(false, Some("   "), None)
+            .expect("noop mode should allow blank token");
+
+        assert!(resolved.is_none());
     }
 
     #[test]

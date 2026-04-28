@@ -2,18 +2,18 @@ use crate::event::{ChatContext, EventContext, SenderContext};
 use chrono::Utc;
 use std::collections::HashMap;
 
-pub struct TemplateContext {
+pub(crate) struct TemplateContext {
     vars: HashMap<String, String>,
 }
 
 impl TemplateContext {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             vars: HashMap::new(),
         }
     }
 
-    pub fn with_user(mut self, sender: &SenderContext) -> Self {
+    pub(crate) fn with_user(mut self, sender: &SenderContext) -> Self {
         self.vars.insert(
             "user_name".to_owned(),
             sender.display_name.clone().unwrap_or_default(),
@@ -33,7 +33,7 @@ impl TemplateContext {
         self
     }
 
-    pub fn with_chat(mut self, chat: &ChatContext) -> Self {
+    pub(crate) fn with_chat(mut self, chat: &ChatContext) -> Self {
         self.vars.insert(
             "chat_title".to_owned(),
             chat.title.clone().unwrap_or_default(),
@@ -42,7 +42,7 @@ impl TemplateContext {
         self
     }
 
-    pub fn with_cron_metadata(mut self) -> Self {
+    pub(crate) fn with_cron_metadata(mut self) -> Self {
         let now = Utc::now();
         self.vars
             .insert("date".to_owned(), now.format("%Y-%m-%d").to_string());
@@ -51,7 +51,7 @@ impl TemplateContext {
         self
     }
 
-    pub fn with_event(mut self, event: &EventContext) -> Self {
+    pub(crate) fn with_event(mut self, event: &EventContext) -> Self {
         if let Some(sender) = &event.sender {
             self = self.with_user(sender);
         }
@@ -61,12 +61,18 @@ impl TemplateContext {
         self.with_cron_metadata()
     }
 
-    pub fn into_map(self) -> HashMap<String, String> {
+    pub(crate) fn into_map(self) -> HashMap<String, String> {
         self.vars
     }
 }
 
-pub fn render_template(template: &str, vars: HashMap<String, String>) -> String {
+impl Default for TemplateContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) fn render_template(template: &str, vars: HashMap<String, String>) -> String {
     let mut rendered = template.to_owned();
     for (key, val) in vars {
         rendered = rendered.replace(&format!("{{{}}}", key), &val);

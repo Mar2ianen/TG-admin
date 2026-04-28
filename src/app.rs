@@ -195,6 +195,21 @@ mod tests {
         assert!(app.runtime.host_api().is_some());
     }
 
+    #[tokio::test]
+    async fn startup_does_not_require_telegram_identity_without_live_polling() {
+        let (_dir, mut config) = app_test_config();
+        config.telegram.primary_chat_ids = vec![-100123];
+
+        let mut app =
+            Application::from_config_with_shutdown(config, ShutdownController::immediate())
+                .expect("application builds");
+
+        app.startup()
+            .await
+            .expect("startup succeeds without live telegram");
+        assert!(app.runtime.summary().router_ready);
+    }
+
     #[test]
     fn runtime_summary_reflects_empty_registry() {
         let (_dir, config) = app_test_config();

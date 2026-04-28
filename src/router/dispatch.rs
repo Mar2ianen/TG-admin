@@ -1,7 +1,7 @@
 use super::classify::extract_command_name;
 use super::types::{UnitDispatchInvocation, UnitDispatchTrigger};
 use crate::event::{EventContext, UpdateType};
-use crate::unit::{TriggerSpec, UnitEventType, UnitRegistry, UnitStatus};
+use crate::unit::{TriggerSpec, UnitRegistry, UnitStatus};
 use regex::Regex;
 
 pub fn select_unit_dispatches(

@@ -1,6 +1,5 @@
 use super::manifest::UnitManifest;
 use super::types::*;
-use super::validation::validate_dependencies;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 

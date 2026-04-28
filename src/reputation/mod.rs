@@ -1,10 +1,8 @@
 use crate::moderation::GlobalSpammerRecord;
 use anyhow::Result;
-use chrono::Utc;
 use moka::future::Cache;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReputationCheckRequest {
@@ -32,11 +30,10 @@ pub struct ReputationClient {
     http: Client,
     base_url: String,
     cache: Cache<i64, ReputationCheckResponse>,
-    bot_id: String,
 }
 
 impl ReputationClient {
-    pub fn new(base_url: String, bot_id: String) -> Self {
+    pub fn new(base_url: String, _bot_id: String) -> Self {
         let cache = Cache::builder()
             .max_capacity(10_000)
             .time_to_live(std::time::Duration::from_secs(3600)) // 1 час жизни записи
@@ -46,7 +43,6 @@ impl ReputationClient {
             http: Client::new(),
             base_url,
             cache,
-            bot_id,
         }
     }
 

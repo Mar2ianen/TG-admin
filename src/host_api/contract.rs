@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-pub enum HostApiRequest {
+pub(crate) enum HostApiRequest {
     CtxCurrent,
     CtxResolveTarget(CtxResolveTargetRequest),
     CtxParseDuration(CtxParseDurationRequest),
@@ -40,7 +40,7 @@ pub enum HostApiRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HostApiValue {
+pub(crate) enum HostApiValue {
     CtxCurrent(Box<CtxCurrentValue>),
     ResolvedTarget(ResolvedTarget),
     ParsedDuration(ParsedDuration),

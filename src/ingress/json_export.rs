@@ -1,10 +1,10 @@
 use crate::event::{
     ChatContext, EventContext, EventNormalizer, MemberContext, MessageContentKind, MessageContext,
-    ReplyContext, SenderContext, TelegramUpdateInput, UpdateType,
+    SenderContext, TelegramUpdateInput, UpdateType,
 };
-use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use chrono::DateTime;
+use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TelegramExport {
@@ -151,6 +151,12 @@ impl JsonExportAdapter {
             trace_id: None,
             build: None,
         })
+    }
+}
+
+impl Default for JsonExportAdapter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

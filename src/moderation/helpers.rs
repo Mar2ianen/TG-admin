@@ -4,7 +4,7 @@ use crate::parser::command::CommandAst;
 use crate::parser::duration::ParsedDuration;
 use crate::parser::reason::ExpandedReason;
 use crate::parser::target::{ParsedTargetSelector, ResolvedTarget, TargetSource};
-use crate::tg::{MessageId, ModerationReason, TelegramPermissions};
+use crate::tg::{ModerationReason, TelegramPermissions};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 

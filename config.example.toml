@@ -1,7 +1,8 @@
 [telegram]
-# Optional. Live polling starts only when bot_token is set and polling = true.
+# Optional. Live polling starts only when polling = true and a non-empty token is
+# provided either here or via TMO_BOT_TOKEN.
 bot_token = ""
-polling = true
+polling = false
 
 # Used by ingress/moderation for known-admin context.
 admin_user_ids = [123456789]

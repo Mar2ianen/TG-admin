@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -9,6 +9,7 @@ use teloxide_core::types::{
     AllowedUpdate, CallbackQuery, Chat, ChatKind, MediaKind, Message, MessageKind, PublicChatKind,
     Update, UpdateKind, User,
 };
+use tracing::warn;
 
 use crate::event::{
     CallbackContext, ChatContext, EventContext, EventNormalizer, MemberContext, MessageContentKind,
@@ -23,6 +24,8 @@ use crate::storage::{
 
 const POLL_LIMIT: u8 = 32;
 const POLL_TIMEOUT_SECS: u32 = 30;
+const POLL_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const POLL_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub struct IngressPipeline {
@@ -62,18 +65,39 @@ impl IngressPipeline {
 
     pub async fn run_until_shutdown(&self, shutdown: ShutdownController) -> Result<ShutdownReason> {
         let mut offset = None;
+        let mut retry_delay = POLL_RETRY_INITIAL_DELAY;
 
         loop {
             tokio::select! {
                 reason = shutdown.wait() => return reason,
                 result = self.poll_once(offset) => {
-                    offset = result?;
+                    match result {
+                        Ok(next_offset) => {
+                            offset = next_offset;
+                            retry_delay = POLL_RETRY_INITIAL_DELAY;
+                        }
+                        Err(err) => {
+                            warn!(
+                                error = %err,
+                                ?offset,
+                                retry_delay_ms = retry_delay.as_millis(),
+                                "ingress polling failed; retrying"
+                            );
+
+                            tokio::select! {
+                                reason = shutdown.wait() => return reason,
+                                _ = tokio::time::sleep(retry_delay) => {}
+                            }
+
+                            retry_delay = next_retry_delay(retry_delay);
+                        }
+                    }
                 }
             }
         }
     }
 
-    async fn poll_once(&self, offset: Option<i32>) -> Result<Option<i32>> {
+    async fn poll_once(&self, mut offset: Option<i32>) -> Result<Option<i32>> {
         let mut request = self
             .bot
             .get_updates()
@@ -101,13 +125,18 @@ impl IngressPipeline {
             .await
             .context("failed to fetch telegram updates")?;
 
-        let mut next_offset = offset;
         for update in updates {
-            next_offset = Some(update.id.0 as i32 + 1);
-            self.process_update(&update).await?;
+            offset = Some(update.id.0 as i32 + 1);
+            if let Err(err) = self.process_update(&update).await {
+                warn!(
+                    update_id = update.id.0,
+                    error = %err,
+                    "failed to process telegram update; continuing"
+                );
+            }
         }
 
-        Ok(next_offset)
+        Ok(offset)
     }
 
     pub async fn process_update(&self, update: &Update) -> Result<IngressProcessResult> {
@@ -444,8 +473,7 @@ fn reaction_update_input(
 ) -> TelegramUpdateInput {
     let sender = reaction
         .user()
-        .clone()
-        .map(|user| sender_context_from_user(&user, admin_user_ids));
+        .map(|user| sender_context_from_user(user, admin_user_ids));
     TelegramUpdateInput {
         event_id: None,
         update_id: u64::from(update_id),
@@ -685,6 +713,34 @@ fn update_type_name(update_type: UpdateType) -> &'static str {
         UpdateType::Job => "job",
         UpdateType::System => "system",
     }
+}
+
+fn next_retry_delay(current: Duration) -> Duration {
+    std::cmp::min(
+        current.checked_add(current).unwrap_or(POLL_RETRY_MAX_DELAY),
+        POLL_RETRY_MAX_DELAY,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn process_polled_updates_for_test(
+    updates: Vec<Update>,
+    mut process_update: impl FnMut(&Update) -> Result<IngressProcessResult>,
+) -> Option<i32> {
+    let mut next_offset = None;
+
+    for update in updates {
+        next_offset = Some(update.id.0 as i32 + 1);
+        if let Err(err) = process_update(&update) {
+            warn!(
+                update_id = update.id.0,
+                error = %err,
+                "failed to process telegram update; continuing"
+            );
+        }
+    }
+
+    next_offset
 }
 
 pub mod json_export;

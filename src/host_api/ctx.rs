@@ -1,14 +1,15 @@
 use super::{
-    CtxCurrentValue, CtxExpandReasonRequest, CtxParseDurationRequest, CtxResolveTargetRequest,
-    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, validate_event,
+    validate_event, CtxCurrentValue, CtxExpandReasonRequest, CtxParseDurationRequest,
+    CtxResolveTargetRequest, HostApi, HostApiError, HostApiErrorDetail, HostApiOperation,
+    HostApiResponse,
 };
 use crate::event::EventContext;
-use crate::parser::duration::{ParsedDuration, parse_duration};
+use crate::parser::duration::{parse_duration, ParsedDuration};
 use crate::parser::reason::ExpandedReason;
-use crate::parser::target::{ResolvedTarget, parse_target_selector, resolve_target};
+use crate::parser::target::{parse_target_selector, resolve_target, ResolvedTarget};
 
 impl HostApi {
-    pub fn ctx_current(
+    pub(crate) fn ctx_current(
         &self,
         event: &EventContext,
     ) -> Result<HostApiResponse<CtxCurrentValue>, HostApiError> {
@@ -22,7 +23,7 @@ impl HostApi {
         ))
     }
 
-    pub fn ctx_resolve_target(
+    pub(crate) fn ctx_resolve_target(
         &self,
         event: &EventContext,
         request: CtxResolveTargetRequest,
@@ -72,7 +73,7 @@ impl HostApi {
         Ok(self.response(HostApiOperation::CtxResolveTarget, resolved))
     }
 
-    pub fn ctx_parse_duration(
+    pub(crate) fn ctx_parse_duration(
         &self,
         event: &EventContext,
         request: CtxParseDurationRequest,
@@ -92,7 +93,7 @@ impl HostApi {
         Ok(self.response(HostApiOperation::CtxParseDuration, parsed))
     }
 
-    pub fn ctx_expand_reason(
+    pub(crate) fn ctx_expand_reason(
         &self,
         event: &EventContext,
         request: CtxExpandReasonRequest,

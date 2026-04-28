@@ -12,6 +12,7 @@ use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::JobRecord;
 use crate::storage::Storage;
 use crate::storage::StorageConnection;
+use crate::tg::init::{fetch_bot_id, ChatInitializer};
 use crate::tg::{
     ParseMode, TelegramExecutionOptions, TelegramGateway, TelegramRequest,
     TelegramSendMessageRequest, TeloxideCoreTransport,
@@ -90,6 +91,10 @@ impl Runtime {
             .storage
             .init()
             .context("failed to open script storage during runtime startup")?;
+        let bot_id = self
+            .bootstrap_telegram_readiness(config)
+            .await
+            .context("failed to verify Telegram readiness during runtime startup")?;
 
         self.execution = self.compose_execution(
             config,
@@ -97,9 +102,31 @@ impl Runtime {
             host_api_storage,
             ingress_storage,
             script_storage,
+            bot_id,
         );
 
         Ok(RuntimeBootstrapInfo { schema_version })
+    }
+
+    async fn bootstrap_telegram_readiness(&self, config: &AppConfig) -> Result<i64> {
+        let Some(bot) = self.services.polling_bot.as_ref() else {
+            return Ok(0);
+        };
+
+        let bot_id = fetch_bot_id(bot)
+            .await
+            .context("failed to resolve Telegram bot identity with getMe")?;
+
+        if !config.telegram.primary_chat_ids.is_empty() {
+            let initializer =
+                ChatInitializer::new(self.services.telegram.transport(), &self.services.storage);
+            initializer
+                .initialize_primary_chats(config.telegram.primary_chat_ids.iter().copied(), bot_id)
+                .await
+                .context("failed to initialize configured primary Telegram chats")?;
+        }
+
+        Ok(bot_id)
     }
 
     fn recover_stale_scheduler_jobs(&self, storage: &StorageConnection) -> Result<usize> {
@@ -109,9 +136,9 @@ impl Runtime {
                 self.services.config.scheduler.max_scheduler_lag_ms as i64,
             );
 
-        Ok(storage
+        storage
             .recover_stale_processing_jobs(&stale_before.to_rfc3339(), &recovery_now.to_rfc3339())
-            .context("scheduler: failed to recover stale processing jobs")?)
+            .context("scheduler: failed to recover stale processing jobs")
     }
 
     fn compose_execution(
@@ -121,6 +148,7 @@ impl Runtime {
         host_api_storage: StorageConnection,
         ingress_storage: StorageConnection,
         script_storage: StorageConnection,
+        bot_id: i64,
     ) -> RuntimeExecution {
         let registry_handle = Rc::new(self.registry.clone());
         let host_api = HostApi::new(false)
@@ -146,7 +174,7 @@ impl Runtime {
             .with_templates_dir(config.paths.templates_dir.clone());
         let script_runner = ScriptRunner::new(config.paths.scripts_dir.clone());
         let router = Rc::new(
-            ExecutionRouter::new(0, config.moderation.delete_unknown) // TODO: Get real bot ID
+            ExecutionRouter::new(bot_id, config.moderation.delete_unknown)
                 .with_registry_handle(registry_handle.clone())
                 .with_moderation(moderation)
                 .with_script_runner(script_runner, script_host_api)
@@ -518,7 +546,7 @@ fn load_registry_from_units_dir(config: &AppConfig) -> Result<UnitRegistry> {
     let paths = fs::read_dir(units_dir)
         .with_context(|| format!("failed to read units dir `{}`", units_dir.display()))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().map_or(false, |ext| ext == "toml"));
+        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"));
 
     let report = UnitRegistry::load_paths(paths);
     if !report.is_fully_valid() && !config.runtime.degraded_mode_enabled {

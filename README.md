@@ -33,13 +33,21 @@ bot_token = "YOUR_BOT_TOKEN_HERE"
 admin_user_ids = [YOUR_TELEGRAM_USER_ID]
 ```
 
+For local/offline runs, set `telegram.polling = false`. For live polling without
+storing the token in `config.toml`, export `TMO_BOT_TOKEN` and leave
+`bot_token` empty.
+
 **Run**
 
 ```sh
 cargo run --release
 ```
 
-The bot starts polling immediately. If `bot_token` is empty, the runtime starts without Telegram transport (useful for offline testing).
+The bot only starts live polling when `telegram.polling = true` and a non-empty
+token is available in `config.toml` or `TMO_BOT_TOKEN`. With `polling = false`,
+the runtime stays in local/noop mode.
+
+For deployment details, see [`docs/DEPLOY_RUNBOOK.md`](docs/DEPLOY_RUNBOOK.md).
 
 ---
 
@@ -49,7 +57,7 @@ All fields live in `config.toml`. The full annotated example is in [`config.exam
 
 | Field | Description |
 |---|---|
-| `telegram.bot_token` | Required for live polling. Leave empty to run without Telegram transport. |
+| `telegram.bot_token` | Required for live polling unless `TMO_BOT_TOKEN` is set. Leave empty with `telegram.polling = false` for local/noop mode. |
 | `telegram.admin_user_ids` | List of Telegram user IDs permitted to run moderation commands. |
 | `paths.units_dir` | Directory scanned for unit manifest `.toml` files on startup. |
 | `paths.scripts_dir` | Directory containing `.rhai` scripts referenced by unit manifests. |

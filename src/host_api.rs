@@ -2,10 +2,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::event::EventContext;
-use crate::host_api::contract::*;
+use crate::host_api::contract::{
+    HostApiRequest, HostApiResponse, HostApiValue, TgSendMessageRequest, TgSendMessageValue,
+    MlTranscribeRequest, MlTranscribeValue,
+};
 use crate::parser::reason::ReasonAliasRegistry;
 use crate::storage::StorageConnection;
-use crate::tg::{TelegramExecutionOptions, TelegramGateway, TelegramRequest, TelegramResult};
+use crate::tg::{TelegramExecutionOptions, TelegramGateway, TelegramResult};
 use crate::unit::UnitRegistry;
 
 pub mod audit;
@@ -24,7 +27,7 @@ pub use contract::*;
 pub use error::{HostApiError, HostApiErrorDetail, HostApiErrorKind};
 pub use ml::MlServerTransport;
 pub(crate) use validation::{
-    apply_user_patch, execution_mode_label, required_capability, storage_error, to_rfc3339,
+    apply_user_patch, execution_mode_label, storage_error, to_rfc3339,
     user_patch_from_increment, validate_event, validate_kv_entry, validate_kv_key,
     validate_non_empty, validate_user_id, validate_user_incr_request, validate_user_patch,
 };
@@ -95,7 +98,7 @@ impl HostApi {
         self.dry_run
     }
 
-    pub fn call(
+    pub(crate) fn call(
         &self,
         event: &EventContext,
         request: HostApiRequest,
@@ -167,7 +170,7 @@ impl HostApi {
         }
     }
 
-    pub fn tg_send_message(
+    pub(crate) fn tg_send_message(
         &self,
         event: &EventContext,
         request: TgSendMessageRequest,
@@ -208,7 +211,7 @@ impl HostApi {
         ))
     }
 
-    pub fn ml_transcribe(
+    pub(crate) fn ml_transcribe(
         &self,
         event: &EventContext,
         request: MlTranscribeRequest,

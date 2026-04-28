@@ -8,11 +8,11 @@ pub use classify::*;
 pub use dispatch::*;
 pub use types::*;
 
-use crate::event::{EventContext, ExecutionMode, UnitContext, UpdateType};
-use crate::moderation::{ModerationEngine, ModerationEventResult, ModerationUnitPolicy};
-use crate::unit::{UnitRegistry, UnitStatus};
+use crate::event::{EventContext, UnitContext};
+use crate::moderation::{ModerationEngine, ModerationUnitPolicy};
+use crate::unit::UnitRegistry;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -22,21 +22,17 @@ pub struct ExecutionRouter {
     moderation: Option<ModerationEngine>,
     script_executor: Option<ScriptExecutor>,
     gateway: Option<std::sync::Arc<crate::tg::TelegramGateway>>,
-    storage: Option<crate::storage::Storage>,
-    bot_id: i64,
     delete_unknown_commands: bool,
 }
 
 impl ExecutionRouter {
-    pub fn new(bot_id: i64, delete_unknown_commands: bool) -> Self {
+    pub fn new(_bot_id: i64, delete_unknown_commands: bool) -> Self {
         Self {
             index: RefCell::new(RouterIndex::new()),
             registry: RefCell::new(None),
             moderation: None,
             script_executor: None,
             gateway: None,
-            storage: None,
-            bot_id,
             delete_unknown_commands,
         }
     }
@@ -46,8 +42,7 @@ impl ExecutionRouter {
         self
     }
 
-    pub fn with_storage(mut self, storage: crate::storage::Storage) -> Self {
-        self.storage = Some(storage);
+    pub fn with_storage(self, _storage: crate::storage::Storage) -> Self {
         self
     }
 
@@ -152,17 +147,14 @@ impl ExecutionRouter {
             }
         }
 
-        let registry_guard = self.registry.borrow();
-        let fallback_registry = UnitRegistry::new();
-        let registry = registry_guard
-            .as_deref()
-            .or(self
-                .moderation
-                .as_ref()
-                .and_then(|m| m.unit_registry.as_deref()))
-            .unwrap_or(&fallback_registry);
+        let registry = self
+            .registry
+            .borrow()
+            .clone()
+            .or_else(|| self.moderation.as_ref().and_then(|m| m.unit_registry.clone()))
+            .unwrap_or_else(|| Rc::new(UnitRegistry::new()));
 
-        let invocations = select_unit_dispatches(registry, event);
+        let invocations = select_unit_dispatches(&registry, event);
 
         if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
             if let Some(moderation) = &self.moderation {
@@ -171,7 +163,7 @@ impl ExecutionRouter {
                 let result = moderation
                     .handle_event_with_unit_policy(event, unit_policy.as_ref())
                     .await
-                    .map_err(|e| RoutingError::Moderation(e))?;
+                    .map_err(RoutingError::Moderation)?;
 
                 return Ok(ExecutionOutcome::BuiltInModeration {
                     plan,
@@ -236,7 +228,7 @@ impl RouterIndex {
                             index
                                 .command_index
                                 .entry(cmd.to_lowercase())
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push(ExecutionLane::UnitDispatch);
                         }
                     }
@@ -245,7 +237,7 @@ impl RouterIndex {
                             index
                                 .event_type_index
                                 .entry(*event_type)
-                                .or_insert_with(Vec::new)
+                                .or_default()
                                 .push(ExecutionLane::UnitDispatch);
                         }
                         index.trait_route_count += 1;
@@ -308,6 +300,12 @@ impl RouterIndex {
             matched_buckets,
             lanes,
         }
+    }
+}
+
+impl Default for RouterIndex {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

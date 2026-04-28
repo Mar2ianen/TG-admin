@@ -1,12 +1,13 @@
 use super::{
-    HostApi, HostApiError, HostApiOperation, HostApiResponse, MsgByUserRequest, MsgByUserValue,
-    MsgWindowRequest, MsgWindowValue, storage_error, validate_event,
+    storage_error, validate_event,
     validation::{validate_msg_by_user_request, validate_msg_window_request},
+    HostApi, HostApiError, HostApiOperation, HostApiResponse, MsgByUserRequest, MsgByUserValue,
+    MsgWindowRequest, MsgWindowValue,
 };
 use crate::event::EventContext;
 
 impl HostApi {
-    pub fn msg_window(
+    pub(crate) fn msg_window(
         &self,
         event: &EventContext,
         request: MsgWindowRequest,
@@ -29,7 +30,7 @@ impl HostApi {
         Ok(self.response(HostApiOperation::MsgWindow, MsgWindowValue { messages }))
     }
 
-    pub fn msg_by_user(
+    pub(crate) fn msg_by_user(
         &self,
         event: &EventContext,
         request: MsgByUserRequest,

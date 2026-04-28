@@ -366,7 +366,7 @@ struct EmbeddingData {
 }
 
 impl HostApi {
-    pub fn ml_health(
+    pub(crate) fn ml_health(
         &self,
         event: &EventContext,
         request: MlHealthRequest,
@@ -404,7 +404,7 @@ impl HostApi {
         Ok(self.response(HostApiOperation::MlHealth, value))
     }
 
-    pub fn ml_embed_text(
+    pub(crate) fn ml_embed_text(
         &self,
         event: &EventContext,
         request: MlEmbedTextRequest,
@@ -447,7 +447,7 @@ impl HostApi {
         ))
     }
 
-    pub fn ml_chat_completions(
+    pub(crate) fn ml_chat_completions(
         &self,
         event: &EventContext,
         request: MlChatCompletionsRequest,
@@ -496,7 +496,7 @@ impl HostApi {
         ))
     }
 
-    pub fn ml_models(
+    pub(crate) fn ml_models(
         &self,
         event: &EventContext,
         request: MlModelsRequest,
@@ -656,15 +656,6 @@ fn validate_ml_chat_request(request: &MlChatCompletionsRequest) -> Result<(), Ho
     }
 
     Ok(())
-}
-
-fn ml_runtime_unavailable(operation: HostApiOperation) -> HostApiError {
-    HostApiError::internal(
-        operation,
-        HostApiErrorDetail::ResourceUnavailable {
-            resource: "ml_server_transport".to_owned(),
-        },
-    )
 }
 
 fn transport_error(operation: HostApiOperation, message: String) -> HostApiError {

@@ -4,7 +4,7 @@ use crate::event::EventContext;
 use crate::storage::AuditLogEntry;
 use uuid::Uuid;
 
-pub fn build_audit_entry(
+pub(crate) fn build_audit_entry(
     event: &EventContext,
     unit_policy: Option<&ModerationUnitPolicy>,
     spec: AuditEntrySpec<'_>,

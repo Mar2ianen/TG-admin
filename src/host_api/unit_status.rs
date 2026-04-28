@@ -1,11 +1,11 @@
 use super::{
-    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, UnitStatusEntry,
-    UnitStatusRequest, UnitStatusValue, validate_event, validate_non_empty,
+    validate_event, validate_non_empty, HostApi, HostApiError, HostApiErrorDetail,
+    HostApiOperation, HostApiResponse, UnitStatusEntry, UnitStatusRequest, UnitStatusValue,
 };
 use crate::event::EventContext;
 
 impl HostApi {
-    pub fn unit_status(
+    pub(crate) fn unit_status(
         &self,
         event: &EventContext,
         request: UnitStatusRequest,

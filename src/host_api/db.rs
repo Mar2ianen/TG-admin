@@ -1,14 +1,14 @@
 use super::{
+    apply_user_patch, storage_error, user_patch_from_increment, validate_event, validate_kv_entry,
+    validate_kv_key, validate_user_id, validate_user_incr_request, validate_user_patch,
     DbKvGetRequest, DbKvGetValue, DbKvSetRequest, DbKvSetValue, DbUserGetRequest, DbUserGetValue,
     DbUserIncrRequest, DbUserIncrValue, DbUserPatchRequest, DbUserPatchValue, HostApi,
-    HostApiError, HostApiOperation, HostApiResponse, apply_user_patch, storage_error,
-    user_patch_from_increment, validate_event, validate_kv_entry, validate_kv_key,
-    validate_user_id, validate_user_incr_request, validate_user_patch,
+    HostApiError, HostApiOperation, HostApiResponse,
 };
 use crate::event::EventContext;
 
 impl HostApi {
-    pub fn db_user_get(
+    pub(crate) fn db_user_get(
         &self,
         event: &EventContext,
         request: DbUserGetRequest,
@@ -24,7 +24,7 @@ impl HostApi {
         Ok(self.response(HostApiOperation::DbUserGet, DbUserGetValue { user }))
     }
 
-    pub fn db_user_patch(
+    pub(crate) fn db_user_patch(
         &self,
         event: &EventContext,
         request: DbUserPatchRequest,
@@ -50,7 +50,7 @@ impl HostApi {
         ))
     }
 
-    pub fn db_user_incr(
+    pub(crate) fn db_user_incr(
         &self,
         event: &EventContext,
         request: DbUserIncrRequest,
@@ -78,7 +78,7 @@ impl HostApi {
         ))
     }
 
-    pub fn db_kv_get(
+    pub(crate) fn db_kv_get(
         &self,
         event: &EventContext,
         request: DbKvGetRequest,
@@ -99,7 +99,7 @@ impl HostApi {
         Ok(self.response(HostApiOperation::DbKvGet, DbKvGetValue { entry }))
     }
 
-    pub fn db_kv_set(
+    pub(crate) fn db_kv_set(
         &self,
         event: &EventContext,
         request: DbKvSetRequest,

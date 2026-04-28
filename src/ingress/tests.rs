@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use teloxide_core::types::Update;
 
 fn pipeline() -> (tempfile::TempDir, IngressPipeline, StorageConnection) {
@@ -249,6 +250,96 @@ fn seed_journal(storage: &StorageConnection) {
             })
             .expect("journal insert");
     }
+}
+
+#[test]
+fn retry_delay_doubles_until_capped() {
+    assert_eq!(
+        super::next_retry_delay(Duration::from_millis(250)),
+        Duration::from_millis(500)
+    );
+    assert_eq!(
+        super::next_retry_delay(Duration::from_secs(3)),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        super::next_retry_delay(Duration::from_secs(5)),
+        Duration::from_secs(5)
+    );
+}
+
+#[tokio::test]
+async fn batch_processing_continues_after_a_single_update_failure() {
+    let (_dir, _pipeline, _storage) = pipeline();
+    let updates = vec![
+        serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 9001,
+                "message": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "date": 1721592601,
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "message_id": 140001,
+                    "text": "first"
+                }
+            }"#,
+        )
+        .expect("first update parses"),
+        serde_json::from_str::<Update>(
+            r#"{
+                "update_id": 9002,
+                "message": {
+                    "chat": {
+                        "id": -1001293752024,
+                        "title": "CryptoInside Chat",
+                        "type": "supergroup",
+                        "username": "cryptoinside_talk"
+                    },
+                    "date": 1721592602,
+                    "from": {
+                        "first_name": "Alice",
+                        "id": 42,
+                        "is_bot": false,
+                        "language_code": "en",
+                        "username": "alice"
+                    },
+                    "message_id": 140002,
+                    "text": "second"
+                }
+            }"#,
+        )
+        .expect("second update parses"),
+    ];
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_for_closure = Arc::clone(&seen);
+
+    let next_offset = super::process_polled_updates_for_test(updates, move |update| {
+        let seen_for_closure = Arc::clone(&seen_for_closure);
+        seen_for_closure
+            .lock()
+            .expect("seen lock")
+            .push(update.id.0);
+
+        if update.id.0 == 9001 {
+            return Err(anyhow::anyhow!("synthetic failure"));
+        }
+
+        Ok(IngressProcessResult::Processed)
+    });
+
+    assert_eq!(next_offset, Some(9003));
+    assert_eq!(*seen.lock().expect("seen lock"), vec![9001, 9002]);
 }
 
 #[test]

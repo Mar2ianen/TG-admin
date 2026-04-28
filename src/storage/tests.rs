@@ -1,9 +1,12 @@
+#![cfg(test)]
+
 use crate::storage::{Storage, StorageConnection};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+#[cfg(test)]
 fn tempdir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tmo_test_{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&dir).unwrap();
@@ -545,12 +548,10 @@ fn jobs_dedupe_by_partial_unique_index() {
 
     assert_eq!(stored_first, first);
     assert_eq!(stored_second, first);
-    assert!(
-        storage
-            .get_job(&second.job_id)
-            .unwrap_or_else(|error| panic!("failed to load duplicate job: {error}"))
-            .is_none()
-    );
+    assert!(storage
+        .get_job(&second.job_id)
+        .unwrap_or_else(|error| panic!("failed to load duplicate job: {error}"))
+        .is_none());
 }
 
 #[test]
@@ -726,6 +727,7 @@ fn external_effects_preserve_request_result_and_status_transitions() {
     assert!(loaded.error_json.is_none());
 }
 
+#[cfg(test)]
 fn bootstrapped_storage() -> StorageConnection {
     let dir = tempdir();
     let database_path = dir.join("runtime.sqlite3");
@@ -736,6 +738,7 @@ fn bootstrapped_storage() -> StorageConnection {
         .unwrap_or_else(|error| panic!("failed to initialize storage: {error}"))
 }
 
+#[cfg(test)]
 fn sqlite_objects(connection: &Connection, object_type: &str) -> BTreeSet<String> {
     let mut statement = connection
         .prepare(
@@ -753,6 +756,7 @@ fn sqlite_objects(connection: &Connection, object_type: &str) -> BTreeSet<String
         .unwrap_or_else(|error| panic!("failed to collect sqlite objects: {error}"))
 }
 
+#[cfg(test)]
 fn index_names_for_table(connection: &Connection, table_name: &str) -> BTreeSet<String> {
     let mut statement = connection
         .prepare(
@@ -772,6 +776,7 @@ fn index_names_for_table(connection: &Connection, table_name: &str) -> BTreeSet<
         .unwrap_or_else(|error| panic!("failed to collect indexes: {error}"))
 }
 
+#[cfg(test)]
 fn table_column_names(connection: &Connection, table_name: &str) -> Vec<String> {
     let pragma = format!("PRAGMA table_info({table_name})");
     let mut statement = connection

@@ -1,5 +1,5 @@
 use super::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
 #[test]
@@ -369,64 +369,50 @@ fn validate_rejects_invalid_trigger_timeout_retry_and_capability_shapes() {
         .validate()
         .expect_err("invalid manifest should not validate");
 
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::MissingExecStart {
-                unit: "moderation.invalid.unit".into(),
-            })
-    );
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::InvalidTriggerShape {
-                unit: "moderation.invalid.unit".into(),
-                trigger_type: TriggerType::Command,
-                detail: TriggerValidationDetail::BlankCommandName,
-            })
-    );
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::InvalidTimeoutShape {
-                unit: "moderation.invalid.unit".into(),
-                detail: TimeoutValidationDetail::NonPositiveTimeout,
-            })
-    );
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::InvalidRetryPolicy {
-                unit: "moderation.invalid.unit".into(),
-                detail: RetryValidationDetail::RetryCountRequiresRestart,
-            })
-    );
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::InvalidRetryPolicy {
-                unit: "moderation.invalid.unit".into(),
-                detail: RetryValidationDetail::RestartDelayRequiresRetries,
-            })
-    );
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::UnknownCapability {
-                unit: "moderation.invalid.unit".into(),
-                capability: "telegram.delete_message".into(),
-                location: CapabilityListKind::Allow,
-            })
-    );
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::UnknownCapability {
-                unit: "moderation.invalid.unit".into(),
-                capability: "sys.shell.exec".into(),
-                location: CapabilityListKind::Deny,
-            })
-    );
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::MissingExecStart {
+            unit: "moderation.invalid.unit".into(),
+        }));
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::InvalidTriggerShape {
+            unit: "moderation.invalid.unit".into(),
+            trigger_type: TriggerType::Command,
+            detail: TriggerValidationDetail::BlankCommandName,
+        }));
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::InvalidTimeoutShape {
+            unit: "moderation.invalid.unit".into(),
+            detail: TimeoutValidationDetail::NonPositiveTimeout,
+        }));
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::InvalidRetryPolicy {
+            unit: "moderation.invalid.unit".into(),
+            detail: RetryValidationDetail::RetryCountRequiresRestart,
+        }));
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::InvalidRetryPolicy {
+            unit: "moderation.invalid.unit".into(),
+            detail: RetryValidationDetail::RestartDelayRequiresRetries,
+        }));
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::UnknownCapability {
+            unit: "moderation.invalid.unit".into(),
+            capability: "telegram.delete_message".into(),
+            location: CapabilityListKind::Allow,
+        }));
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::UnknownCapability {
+            unit: "moderation.invalid.unit".into(),
+            capability: "sys.shell.exec".into(),
+            location: CapabilityListKind::Deny,
+        }));
 }
 
 #[test]
@@ -488,22 +474,18 @@ fn validate_set_rejects_missing_dependency_and_dependency_cycle() {
     let error = UnitManifest::validate_set(&[alpha, beta])
         .expect_err("invalid dependency graph should fail validation");
 
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::MissingDependency {
-                unit: "beta.unit".into(),
-                dependency: "missing.unit".into(),
-                relation: UnitDependencyRelation::Wants,
-            })
-    );
-    assert!(
-        error
-            .issues()
-            .contains(&UnitValidationError::DependencyCycle {
-                cycle: vec!["alpha.unit".into(), "beta.unit".into(), "alpha.unit".into()],
-            })
-    );
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::MissingDependency {
+            unit: "beta.unit".into(),
+            dependency: "missing.unit".into(),
+            relation: UnitDependencyRelation::Wants,
+        }));
+    assert!(error
+        .issues()
+        .contains(&UnitValidationError::DependencyCycle {
+            cycle: vec!["alpha.unit".into(), "beta.unit".into(), "alpha.unit".into()],
+        }));
 }
 
 #[test]
