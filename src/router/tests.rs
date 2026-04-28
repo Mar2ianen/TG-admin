@@ -31,6 +31,7 @@ fn chat() -> ChatContext {
         chat_type: "supergroup".to_owned(),
         title: Some("Moderation HQ".to_owned()),
         username: Some("mod_hq".to_owned()),
+        photo_file_id: None,
         thread_id: Some(11),
     }
 }
@@ -41,6 +42,7 @@ fn private_chat() -> ChatContext {
         chat_type: "private".to_owned(),
         title: None,
         username: Some("dm_user".to_owned()),
+        photo_file_id: None,
         thread_id: None,
     }
 }
@@ -50,6 +52,9 @@ fn admin_sender() -> SenderContext {
         id: 42,
         username: Some("admin".to_owned()),
         display_name: Some("Admin".to_owned()),
+        first_name: "Admin".to_owned(),
+        last_name: None,
+        photo_file_id: None,
         is_bot: false,
         is_admin: true,
         role: Some("owner".to_owned()),
@@ -204,7 +209,7 @@ fn router_with_moderation() -> ExecutionRouter {
     let engine = ModerationEngine::new(storage, gateway)
         .with_unit_registry(registry_with_caps(&[]))
         .with_admin_user_ids([42]);
-    ExecutionRouter::new().with_moderation(engine)
+    ExecutionRouter::new(0, false).with_moderation(engine)
 }
 
 #[test]
@@ -349,7 +354,7 @@ fn classifier_maps_every_message_content_kind_to_its_bucket() {
 
 #[test]
 fn router_plan_tracks_buckets_for_non_command_text() {
-    let router = ExecutionRouter::new();
+    let router = ExecutionRouter::new(0, false);
     let plan = router.plan(&realtime_text_event("hello"));
 
     assert!(
@@ -431,8 +436,8 @@ fn router_sync_registry_rebuilds_from_live_registry_state() {
         TriggerSpec::command(["audit"]),
         ServiceSpec::new("scripts/command/audit.rhai"),
     );
-    let router =
-        ExecutionRouter::new().with_registry(registry_from_manifests(vec![stats_manifest]));
+    let router = ExecutionRouter::new(0, false)
+        .with_registry(registry_from_manifests(vec![stats_manifest]));
 
     assert!(
         router
@@ -566,7 +571,7 @@ async fn router_passes_explicit_unit_policy_to_built_in_moderation() {
         .with_unit_registry(registry.clone())
         .with_dry_run(true)
         .with_admin_user_ids([42]);
-    let router = ExecutionRouter::new()
+    let router = ExecutionRouter::new(0, false)
         .with_registry(registry.clone())
         .with_moderation(engine);
     let mut event = manual_event("/mute 30m spam");
@@ -642,7 +647,9 @@ async fn router_dispatches_matching_command_units_with_service_envelope() {
         ServiceSpec::new("scripts/moderation/stats_audit.rhai"),
     );
     manifest.service.entry_point = Some("handle_stats".to_owned());
-    let router = ExecutionRouter::new().with_registry(registry_from_manifests(vec![manifest]));
+    let router = ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![
+        manifest,
+    ]));
 
     let outcome = router
         .route(&manual_event("/stats"))
@@ -678,7 +685,7 @@ async fn router_dispatches_matching_regex_units_only_when_pattern_matches() {
         TriggerSpec::regex("\\+\\d{11}"),
         ServiceSpec::new("scripts/filter/phone.rhai"),
     );
-    let router = ExecutionRouter::new()
+    let router = ExecutionRouter::new(0, false)
         .with_registry(registry_from_manifests(vec![matching, non_matching]));
 
     let outcome = router
@@ -709,7 +716,9 @@ async fn router_dispatches_matching_event_type_units() {
         TriggerSpec::event_type([UnitEventType::CallbackQuery]),
         ServiceSpec::new("scripts/callback/resolve.rhai"),
     );
-    let router = ExecutionRouter::new().with_registry(registry_from_manifests(vec![manifest]));
+    let router = ExecutionRouter::new(0, false).with_registry(registry_from_manifests(vec![
+        manifest,
+    ]));
 
     let outcome = router
         .route(&callback_event("resolve:123"))
@@ -734,7 +743,7 @@ async fn router_dispatches_matching_event_type_units() {
 
 #[tokio::test]
 async fn router_reports_missing_executor_for_indexed_lane() {
-    let router = ExecutionRouter::new();
+    let router = ExecutionRouter::new(0, false);
     let mut event = manual_event("/warn @spam spam");
     event.reply = Some(crate::event::ReplyContext {
         message_id: 900,

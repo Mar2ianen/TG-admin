@@ -154,6 +154,7 @@ mod tests {
             chat_type: "supergroup".to_owned(),
             title: Some("Moderation HQ".to_owned()),
             username: Some("mod_hq".to_owned()),
+            photo_file_id: None,
             thread_id: Some(11),
         }
     }
@@ -163,6 +164,9 @@ mod tests {
             id: 42,
             username: Some("admin".to_owned()),
             display_name: Some("Admin".to_owned()),
+            first_name: "Admin".to_owned(),
+            last_name: None,
+            photo_file_id: None,
             is_bot: false,
             is_admin: true,
             role: Some("owner".to_owned()),
@@ -306,6 +310,8 @@ mod tests {
                 origin_chat_id: Some(-100123),
                 from_user_id: 42,
             }),
+            chat_member: None,
+            reaction: None,
             locale: None,
             trace_id: None,
             build: None,

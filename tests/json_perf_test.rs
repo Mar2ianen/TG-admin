@@ -41,7 +41,7 @@ async fn test_json_export_performance() {
     let storage_path = dir.path().join("perf_test.sqlite3");
     let storage = Storage::new(storage_path).init().expect("storage init");
 
-    let router = Rc::new(ExecutionRouter::new().with_registry(UnitRegistry::new()));
+    let router = Rc::new(ExecutionRouter::new(0, false).with_registry(UnitRegistry::new()));
     let _pipeline = IngressPipeline::new(
         teloxide_core::Bot::new("12345:TOKEN"),
         storage.clone(),

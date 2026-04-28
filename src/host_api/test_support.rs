@@ -28,6 +28,7 @@ pub(crate) fn manual_event() -> EventContext {
         chat_type: "supergroup".to_owned(),
         title: Some("Moderation HQ".to_owned()),
         username: Some("mod_hq".to_owned()),
+        photo_file_id: None,
         thread_id: Some(7),
     });
     input.reply = Some(ReplyContext {

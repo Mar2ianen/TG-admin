@@ -128,6 +128,7 @@ fn chat() -> ChatContext {
         chat_type: "supergroup".to_owned(),
         title: Some("Moderation HQ".to_owned()),
         username: Some("mod_hq".to_owned()),
+        photo_file_id: None,
         thread_id: None,
     }
 }
@@ -137,6 +138,9 @@ fn sender() -> SenderContext {
         id: 42,
         username: Some("admin".to_owned()),
         display_name: Some("Admin".to_owned()),
+        first_name: "Admin".to_owned(),
+        last_name: None,
+        photo_file_id: None,
         is_bot: false,
         is_admin: true,
         role: Some("owner".to_owned()),
@@ -148,6 +152,9 @@ fn non_admin_sender() -> SenderContext {
         id: 777,
         username: Some("member".to_owned()),
         display_name: Some("Member".to_owned()),
+        first_name: "Member".to_owned(),
+        last_name: None,
+        photo_file_id: None,
         is_bot: false,
         is_admin: false,
         role: Some("member".to_owned()),

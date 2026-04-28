@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::event::EventContext;
@@ -39,6 +40,7 @@ pub struct HostApi {
     aliases: ReasonAliasRegistry,
     ml_transport: Option<MlServerTransport>,
     gateway: TelegramGateway,
+    templates_dir: PathBuf,
 }
 
 impl HostApi {
@@ -50,6 +52,7 @@ impl HostApi {
             aliases: ReasonAliasRegistry::new(),
             ml_transport: None,
             gateway: TelegramGateway::new(false),
+            templates_dir: PathBuf::from("templates"),
         }
     }
 
@@ -60,6 +63,11 @@ impl HostApi {
 
     pub fn with_ml_server_transport(mut self, transport: MlServerTransport) -> Self {
         self.ml_transport = Some(transport);
+        self
+    }
+
+    pub fn with_templates_dir(mut self, templates_dir: impl Into<PathBuf>) -> Self {
+        self.templates_dir = templates_dir.into();
         self
     }
 
@@ -345,7 +353,7 @@ impl HostApi {
     }
 
     pub fn load_template(&self, name: &str) -> String {
-        let custom_path = std::path::Path::new("templates").join(format!("{}.txt", name));
+        let custom_path = self.templates_dir.join(format!("{}.txt", name));
         if let Ok(content) = std::fs::read_to_string(&custom_path) {
             return content;
         }

@@ -28,7 +28,7 @@ fn pipeline() -> (tempfile::TempDir, IngressPipeline, StorageConnection) {
     let pipeline = IngressPipeline::new(
         teloxide_core::Bot::new("123456:TEST_TOKEN"),
         ingress_storage,
-        Rc::new(ExecutionRouter::new()),
+        Rc::new(ExecutionRouter::new(0, false)),
     )
     .with_admin_user_ids([42]);
     (dir, pipeline, inspect_storage)
@@ -139,6 +139,23 @@ impl TelegramTransport for RecordingTransport {
                     text: request.text,
                 })
             }
+            TelegramRequest::GetChatAdministrators(request) => {
+                TelegramResult::ChatAdministrators(crate::tg::TelegramChatAdministratorsResult {
+                    chat_id: request.chat_id,
+                    administrators: Vec::new(),
+                })
+            }
+            TelegramRequest::GetChatMember(request) => {
+                TelegramResult::ChatMember(crate::tg::TelegramChatMemberResult {
+                    chat_id: request.chat_id,
+                    user_id: request.user_id,
+                    member: crate::tg::TelegramChatMember {
+                        user_id: request.user_id,
+                        is_admin: false,
+                        can_restrict_members: None,
+                    },
+                })
+            }
         })
     }
 }
@@ -199,7 +216,7 @@ fn moderation_pipeline_with_caps(
         .with_unit_registry(registry.clone())
         .with_admin_user_ids([42])
         .without_processed_update_guard();
-    let router = ExecutionRouter::new()
+    let router = ExecutionRouter::new(0, false)
         .with_registry(registry)
         .with_moderation(moderation);
     let pipeline = IngressPipeline::new(
@@ -609,12 +626,16 @@ async fn process_event_appends_journal_and_marks_update_complete() {
                 chat_type: "private".to_owned(),
                 title: None,
                 username: Some("hirrolot".to_owned()),
+                photo_file_id: None,
                 thread_id: None,
             },
             SenderContext {
                 id: 408258968,
                 username: Some("hirrolot".to_owned()),
                 display_name: Some("Hirrolot".to_owned()),
+                first_name: "Hirrolot".to_owned(),
+                last_name: None,
+                photo_file_id: None,
                 is_bot: false,
                 is_admin: false,
                 role: None,
@@ -663,12 +684,16 @@ async fn process_event_skips_replayed_updates_before_routing() {
                 chat_type: "supergroup".to_owned(),
                 title: Some("Replay".to_owned()),
                 username: None,
+                photo_file_id: None,
                 thread_id: None,
             },
             SenderContext {
                 id: 77,
                 username: Some("alice".to_owned()),
                 display_name: Some("Alice".to_owned()),
+                first_name: "Alice".to_owned(),
+                last_name: None,
+                photo_file_id: None,
                 is_bot: false,
                 is_admin: false,
                 role: None,
@@ -714,7 +739,7 @@ async fn process_update_dispatches_loaded_unit_and_marks_update_complete() {
     )])
     .registry;
     let (_dir, pipeline, inspect_storage) =
-        pipeline_with_router(ExecutionRouter::new().with_registry(registry));
+        pipeline_with_router(ExecutionRouter::new(0, false).with_registry(registry));
     let update = serde_json::from_str::<Update>(
         r#"{
             "update_id": 439432700,
@@ -786,7 +811,7 @@ async fn process_update_skips_replayed_live_unit_dispatch_before_routing() {
     )])
     .registry;
     let (_dir, pipeline, inspect_storage) =
-        pipeline_with_router(ExecutionRouter::new().with_registry(registry));
+        pipeline_with_router(ExecutionRouter::new(0, false).with_registry(registry));
     let update = serde_json::from_str::<Update>(
         r#"{
             "update_id": 439432701,

@@ -16,3 +16,9 @@ mod tests_surface;
 
 #[path = "tests_unit_status.rs"]
 mod tests_unit_status;
+
+#[path = "tests_capabilities.rs"]
+mod tests_capabilities;
+
+#[path = "tests_template.rs"]
+mod tests_template;

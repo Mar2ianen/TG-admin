@@ -112,7 +112,8 @@ impl Runtime {
         let host_api = HostApi::new(false)
             .with_storage(host_api_storage)
             .with_unit_registry_handle(registry_handle.clone())
-            .with_ml_server_transport(self.services.ml_server_transport.clone());
+            .with_ml_server_transport(self.services.ml_server_transport.clone())
+            .with_templates_dir(config.paths.templates_dir.clone());
 
         let mut moderation =
             ModerationEngine::new(moderation_storage, self.services.telegram.clone())
@@ -127,7 +128,8 @@ impl Runtime {
         let script_host_api = HostApi::new(false)
             .with_storage(script_storage)
             .with_unit_registry_handle(registry_handle.clone())
-            .with_ml_server_transport(self.services.ml_server_transport.clone());
+            .with_ml_server_transport(self.services.ml_server_transport.clone())
+            .with_templates_dir(config.paths.templates_dir.clone());
         let script_runner = ScriptRunner::new(config.paths.scripts_dir.clone());
         let router = Rc::new(
             ExecutionRouter::new(0, config.moderation.delete_unknown) // TODO: Get real bot ID

@@ -45,12 +45,16 @@ fn bench_event_normalize(c: &mut Criterion) {
         chat_type: "supergroup".to_owned(),
         title: Some("Test".to_owned()),
         username: Some("test".to_owned()),
+        photo_file_id: None,
         thread_id: None,
     };
     let sender = SenderContext {
         id: 42,
         username: Some("user".to_owned()),
         display_name: Some("User".to_owned()),
+        first_name: "User".to_owned(),
+        last_name: None,
+        photo_file_id: None,
         is_bot: false,
         is_admin: false,
         role: None,
@@ -145,12 +149,16 @@ fn dummy_event() -> telegram_moderation_os::event::EventContext {
         chat_type: "supergroup".to_owned(),
         title: Some("Bench".to_owned()),
         username: Some("bench".to_owned()),
+        photo_file_id: None,
         thread_id: None,
     });
     event.sender = Some(SenderContext {
         id: 42,
         username: Some("user".to_owned()),
         display_name: Some("User".to_owned()),
+        first_name: "User".to_owned(),
+        last_name: None,
+        photo_file_id: None,
         is_bot: false,
         is_admin: false,
         role: None,
