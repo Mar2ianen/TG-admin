@@ -86,6 +86,17 @@ impl ExecutionRouter {
         self.index.borrow().plan(classified)
     }
 
+    pub async fn handle_moderation_error(
+        &self,
+        event: &EventContext,
+        err: crate::moderation::ModerationError,
+    ) -> Result<(), crate::tg::TelegramError> {
+        if let Some(moderation) = self.moderation.as_ref() {
+            moderation.handle_error(event, err).await?;
+        }
+        Ok(())
+    }
+
     pub async fn route(&self, event: &EventContext) -> Result<ExecutionOutcome, RoutingError> {
         // Инициализация прав при входе бота
         if event.update_type == crate::event::UpdateType::MyChatMember {
@@ -93,58 +104,50 @@ impl ExecutionRouter {
         }
 
         // Реакции на пользователей
-        if event.update_type == crate::event::UpdateType::ChatMember
+        if (event.update_type == crate::event::UpdateType::ChatMember
             || event.update_type == crate::event::UpdateType::MyChatMember
-            || event.update_type == crate::event::UpdateType::ChatMemberUpdated
+            || event.update_type == crate::event::UpdateType::ChatMemberUpdated)
+            && let Some(moderation) = self.moderation.as_ref()
+            && let Some(member) = event.chat_member.as_ref()
         {
-            if let Some(moderation) = self.moderation.as_ref() {
-                if let Some(member) = event.chat_member.as_ref() {
-                    if member.is_joined() {
-                        let _ = moderation.on_member_joined(event).await;
-                    } else if member.is_left() {
-                        let _ = moderation.on_member_left(event).await;
-                    }
-                }
+            if member.is_joined() {
+                let _ = moderation.on_member_joined(event).await;
+            } else if member.is_left() {
+                let _ = moderation.on_member_left(event).await;
             }
         }
 
         let plan = self.plan(event);
 
         // Перехват неизвестных команд
-        if let Some(cmd_name) = plan.classified.command_name.as_ref() {
-            if !self.index.borrow().is_known_command(cmd_name) {
-                if let Some(moderation) = self.moderation.as_ref() {
-                    let _ = moderation
-                        .handle_error(
-                            event,
-                            crate::moderation::ModerationError::UnsupportedCommand(
-                                cmd_name.clone(),
-                            ),
-                        )
-                        .await;
+        if let Some(cmd_name) = plan.classified.command_name.as_ref()
+            && !self.index.borrow().is_known_command(cmd_name)
+            && let Some(moderation) = self.moderation.as_ref()
+        {
+            let _ = moderation
+                .handle_error(
+                    event,
+                    crate::moderation::ModerationError::UnsupportedCommand(cmd_name.clone()),
+                )
+                .await;
 
-                    if self.delete_unknown_commands {
-                        if let (Some(msg), Some(gateway)) =
-                            (event.message.as_ref(), self.gateway.as_ref())
-                        {
-                            let chat_id = event.chat.as_ref().map(|c| c.id).unwrap_or(0);
-                            let del_req = crate::tg::TelegramRequest::Delete(
-                                crate::tg::TelegramDeleteRequest {
-                                    chat_id,
-                                    message_id: msg.id,
-                                    idempotency_key: None,
-                                },
-                            );
-                            let gateway = gateway.clone();
-                            tokio::spawn(async move {
-                                let _ = gateway.execute(del_req).await;
-                            });
-                        }
-                    }
-
-                    return Ok(ExecutionOutcome::Unhandled(plan));
-                }
+            if self.delete_unknown_commands
+                && let (Some(msg), Some(gateway)) = (event.message.as_ref(), self.gateway.as_ref())
+            {
+                let chat_id = event.chat.as_ref().map(|c| c.id).unwrap_or(0);
+                let del_req =
+                    crate::tg::TelegramRequest::Delete(crate::tg::TelegramDeleteRequest {
+                        chat_id,
+                        message_id: msg.id,
+                        idempotency_key: None,
+                    });
+                let gateway = gateway.clone();
+                tokio::spawn(async move {
+                    let _ = gateway.execute(del_req).await;
+                });
             }
+
+            return Ok(ExecutionOutcome::Unhandled(plan));
         }
 
         let registry = self
@@ -160,21 +163,21 @@ impl ExecutionRouter {
 
         let invocations = select_unit_dispatches(&registry, event);
 
-        if plan.lanes.contains(&ExecutionLane::BuiltInModeration) {
-            if let Some(moderation) = &self.moderation {
-                let unit_policy = unit_policy_for_builtin_moderation(&invocations);
+        if plan.lanes.contains(&ExecutionLane::BuiltInModeration)
+            && let Some(moderation) = &self.moderation
+        {
+            let unit_policy = unit_policy_for_builtin_moderation(&invocations);
 
-                let result = moderation
-                    .handle_event_with_unit_policy(event, unit_policy.as_ref())
-                    .await
-                    .map_err(RoutingError::Moderation)?;
+            let result = moderation
+                .handle_event_with_unit_policy(event, unit_policy.as_ref())
+                .await
+                .map_err(RoutingError::Moderation)?;
 
-                return Ok(ExecutionOutcome::BuiltInModeration {
-                    plan,
-                    result,
-                    deferred_invocations: invocations,
-                });
-            }
+            return Ok(ExecutionOutcome::BuiltInModeration {
+                plan,
+                result,
+                deferred_invocations: invocations,
+            });
         }
 
         if plan.lanes.contains(&ExecutionLane::UnitDispatch) || !invocations.is_empty() {
@@ -286,17 +289,17 @@ impl RouterIndex {
         if let Some(command_name) = &classified.command_name {
             matched_buckets.push(RouteBucket::CommandIndex(command_name.clone()));
         }
-        if let Some(cmd) = &classified.command_name {
-            if let Some(mapped_lanes) = self.command_index.get(cmd) {
-                lanes.extend(mapped_lanes);
-            }
+        if let Some(cmd) = &classified.command_name
+            && let Some(mapped_lanes) = self.command_index.get(cmd)
+        {
+            lanes.extend(mapped_lanes);
         }
 
         // Check for event type dispatch if unit exists
-        if let Some(event_type) = map_update_to_unit_event(classified.update_type) {
-            if let Some(mapped_lanes) = self.event_type_index.get(&event_type) {
-                lanes.extend(mapped_lanes);
-            }
+        if let Some(event_type) = map_update_to_unit_event(classified.update_type)
+            && let Some(mapped_lanes) = self.event_type_index.get(&event_type)
+        {
+            lanes.extend(mapped_lanes);
         }
 
         RoutePlan {

@@ -17,10 +17,19 @@ use crate::tg::{
 };
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use std::collections::HashMap;
 
 const HELP_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/bundled_templates/ui/help.txt"
+));
+const BAN_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/bundled_templates/moderation/ban.txt"
+));
+const UNDO_SUCCESS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/bundled_templates/moderation/undo_success.txt"
 ));
 
 impl ModerationEngine {
@@ -188,7 +197,7 @@ impl ModerationEngine {
     ) -> Result<ModerationExecution, ModerationError> {
         self.require_capability(event, unit_policy, "tg.moderate.restrict")?;
         let target = describe_target(event, &command.command.target)?;
-        let user_id = require_user_id(&target, "mute")?;
+        let user_id = self.resolve_target_user_id(&target, "mute")?;
         let chat_id = require_chat_id(event)?;
         let until = add_duration(event.received_at, command.command.duration)?;
         let reason = moderation_reason(command.expanded_reason.as_ref());
@@ -277,7 +286,7 @@ impl ModerationEngine {
     ) -> Result<ModerationExecution, ModerationError> {
         self.require_capability(event, unit_policy, "tg.moderate.ban")?;
         let target = describe_target(event, &command.command.target)?;
-        let user_id = require_user_id(&target, "ban")?;
+        let user_id = self.resolve_target_user_id(&target, "ban")?;
         let chat_id = require_chat_id(event)?;
         let reason = moderation_reason(command.expanded_reason.as_ref());
         let telegram = self
@@ -299,6 +308,30 @@ impl ModerationEngine {
 
         let mut execution = ModerationExecution::new(dry_run);
         execution.telegram.push(telegram.clone());
+        let confirmation = self
+            .gateway
+            .execute_checked(
+                TelegramRequest::SendMessage(TelegramSendMessageRequest {
+                    chat_id,
+                    text: crate::host_api::template::render_template(
+                        BAN_TEMPLATE,
+                        confirmation_vars(
+                            event,
+                            &target.label,
+                            command.expanded_reason.as_ref(),
+                            None,
+                        ),
+                    ),
+                    reply_to_message_id: None,
+                    silent: false,
+                    parse_mode: crate::tg::ParseMode::PlainText,
+                    markup: None,
+                }),
+                TelegramExecutionOptions { dry_run },
+            )
+            .await
+            .map_err(ModerationError::Telegram)?;
+        execution.telegram.push(confirmation);
         let audit = self.build_audit_entry(
             event,
             unit_policy,
@@ -445,27 +478,53 @@ impl ModerationEngine {
     ) -> Result<ModerationExecution, ModerationError> {
         self.require_capability(event, unit_policy, "audit.compensate")?;
         let chat_id = require_chat_id(event)?;
-        let reference_message_id = undo_reference_message_id(event)?;
-        let original = self
-            .storage
-            .find_audit_entries(
-                &AuditLogFilter {
-                    chat_id: Some(chat_id),
-                    trigger_message_id: Some(i64::from(reference_message_id)),
-                    reversible: Some(true),
-                    ..AuditLogFilter::default()
-                },
-                20,
-            )
-            .map_err(ModerationError::Storage)?
-            .into_iter()
-            .find(|entry| entry.op != "undo")
-            .ok_or_else(|| {
-                ModerationError::Validation(format!(
-                    "no reversible audit entry found for trigger message {}",
-                    reference_message_id
-                ))
-            })?;
+        let original = if let Some(reference_message_id) = undo_reference_message_id(event) {
+            self.storage
+                .find_audit_entries(
+                    &AuditLogFilter {
+                        chat_id: Some(chat_id),
+                        trigger_message_id: Some(i64::from(reference_message_id)),
+                        reversible: Some(true),
+                        ..AuditLogFilter::default()
+                    },
+                    20,
+                )
+                .map_err(ModerationError::Storage)?
+                .into_iter()
+                .find(|entry| entry.op != "undo")
+                .ok_or_else(|| {
+                    ModerationError::Validation(format!(
+                        "no reversible audit entry found for trigger message {}",
+                        reference_message_id
+                    ))
+                })?
+        } else {
+            let actor_user_id = event
+                .sender
+                .as_ref()
+                .map(|sender| sender.id)
+                .ok_or_else(|| {
+                    ModerationError::Validation("undo requires sender context".to_owned())
+                })?;
+            self.storage
+                .find_audit_entries(
+                    &AuditLogFilter {
+                        chat_id: Some(chat_id),
+                        actor_user_id: Some(actor_user_id),
+                        reversible: Some(true),
+                        ..AuditLogFilter::default()
+                    },
+                    20,
+                )
+                .map_err(ModerationError::Storage)?
+                .into_iter()
+                .find(|entry| entry.op != "undo")
+                .ok_or_else(|| {
+                    ModerationError::Validation(
+                        "no recent reversible moderation action found for undo".to_owned(),
+                    )
+                })?
+        };
         let undo_idempotency_key = format!("undo:{}", original.action_id);
 
         let already_undone = !self
@@ -498,6 +557,25 @@ impl ModerationEngine {
         let target =
             execute_compensation(self, event, &recipe, dry_run, &mut execution, unit_policy)
                 .await?;
+        let success = self
+            .gateway
+            .execute_checked(
+                TelegramRequest::SendMessage(TelegramSendMessageRequest {
+                    chat_id,
+                    text: crate::host_api::template::render_template(
+                        UNDO_SUCCESS_TEMPLATE,
+                        confirmation_vars(event, &target.label, None, Some(&original.op)),
+                    ),
+                    reply_to_message_id: None,
+                    silent: false,
+                    parse_mode: crate::tg::ParseMode::PlainText,
+                    markup: None,
+                }),
+                TelegramExecutionOptions { dry_run },
+            )
+            .await
+            .map_err(ModerationError::Telegram)?;
+        execution.telegram.push(success);
 
         let audit = self.build_audit_entry(
             event,
@@ -559,6 +637,30 @@ impl ModerationEngine {
             audit_entries: Vec::new(),
             jobs: Vec::new(),
         })
+    }
+
+    fn resolve_target_user_id(
+        &self,
+        target: &ExecutionTarget,
+        op: &str,
+    ) -> Result<i64, ModerationError> {
+        if let Some(user_id) = target.user_id {
+            return Ok(user_id);
+        }
+
+        if let Some(username) = target.username.as_deref()
+            && let Some(user) = self.storage.get_user_by_username(username)?
+        {
+            return Ok(user.user_id);
+        }
+
+        if let Some(username) = target.username.as_deref() {
+            return Err(ModerationError::Validation(format!(
+                "`/{op}` does not know @{username} yet; reply to one of that user's messages or wait until the bot sees a fresh message from them"
+            )));
+        }
+
+        require_user_id(target, op)
     }
 
     pub(crate) async fn execute_ping(
@@ -667,4 +769,35 @@ impl ModerationEngine {
             .insert_job(&job)
             .map_err(ModerationError::Storage)
     }
+}
+
+fn confirmation_vars(
+    event: &EventContext,
+    target_label: &str,
+    reason: Option<&crate::parser::reason::ExpandedReason>,
+    op: Option<&str>,
+) -> HashMap<String, String> {
+    let mut vars = crate::host_api::template::TemplateContext::new()
+        .with_event(event)
+        .into_map();
+    vars.insert(
+        "admin_link".to_owned(),
+        event
+            .sender
+            .as_ref()
+            .and_then(|sender| sender.display_name.clone())
+            .unwrap_or_else(|| "Администратор".to_owned()),
+    );
+    vars.insert("user_link".to_owned(), target_label.to_owned());
+    vars.insert(
+        "reason".to_owned(),
+        reason
+            .map(reason_text)
+            .unwrap_or_else(|| "не указана".to_owned()),
+    );
+    if let Some(op) = op {
+        vars.insert("op".to_owned(), op.to_owned());
+    }
+    vars.insert("target".to_owned(), target_label.to_owned());
+    vars
 }

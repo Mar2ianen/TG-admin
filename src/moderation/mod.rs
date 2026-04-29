@@ -194,8 +194,9 @@ impl ModerationEngine {
         let unit = unit_policy
             .map(|policy| &policy.unit)
             .or(event.system.unit.as_ref());
-
-        println!("Checking capability {} for unit {:?}", capability, unit);
+        if unit.is_none() {
+            return Ok(());
+        }
 
         let unit = unit.ok_or_else(|| ModerationError::CapabilityDenied {
             capability: capability.to_owned(),
@@ -252,7 +253,20 @@ impl ModerationEngine {
             return Err(ModerationError::AuthorizationDenied { user_id: None });
         };
 
-        if sender.is_admin || self.admin_user_ids.contains(&sender.id) {
+        if sender.is_admin {
+            return Ok(());
+        }
+
+        if let Some(chat) = event.chat.as_ref()
+            && self
+                .storage
+                .get_chat_user_is_admin(chat.id, sender.id)?
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        if self.admin_user_ids.contains(&sender.id) {
             return Ok(());
         }
 
@@ -297,15 +311,29 @@ impl ModerationEngine {
         event: &EventContext,
         err: ModerationError,
     ) -> Result<(), crate::tg::TelegramError> {
-        let (_template_name, _context) = crate::moderation::reactions::error_to_template(&err);
-
-        // Временная реализация: отправляем простой текст, так как полноценный UI шаблон требует HostApi
-        let text = format!("Ошибка: {}", err);
+        let template = match &err {
+            ModerationError::AuthorizationDenied { .. } => include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/bundled_templates/moderation/access_denied.txt"
+            )),
+            ModerationError::BotPermissionDenied => include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/bundled_templates/moderation/bot_not_admin.txt"
+            )),
+            _ => include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/bundled_templates/moderation/generic_error.txt"
+            )),
+        };
+        let text = crate::host_api::template::render_template(
+            template,
+            std::collections::HashMap::from([("message".to_owned(), err.to_string())]),
+        );
         let request =
             crate::tg::TelegramRequest::SendMessage(crate::tg::TelegramSendMessageRequest {
                 chat_id: event.chat.as_ref().map(|c| c.id).unwrap_or(0),
                 text,
-                reply_to_message_id: event.message.as_ref().map(|m| m.id),
+                reply_to_message_id: None,
                 silent: false,
                 parse_mode: crate::tg::ParseMode::PlainText,
                 markup: None,

@@ -97,7 +97,7 @@ pub fn build_notice_text(action: &str, target: &str, reason: Option<&ExpandedRea
     format!("{action} {target}: {reason}")
 }
 
-pub fn undo_reference_message_id(event: &EventContext) -> Result<i32, ModerationError> {
+pub fn undo_reference_message_id(event: &EventContext) -> Option<i32> {
     event
         .message
         .as_ref()
@@ -107,11 +107,6 @@ pub fn undo_reference_message_id(event: &EventContext) -> Result<i32, Moderation
                 .callback
                 .as_ref()
                 .and_then(|callback| callback.message_id)
-        })
-        .ok_or_else(|| {
-            ModerationError::Validation(
-                "undo requires reply_to_message_id or callback message context".to_owned(),
-            )
         })
 }
 
@@ -253,4 +248,12 @@ pub fn hash_text(input: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     input.hash(&mut hasher);
     hasher.finish()
+}
+
+pub fn render_template(template: &str, bindings: &[(&str, &str)]) -> String {
+    let mut rendered = template.trim().to_owned();
+    for (key, value) in bindings {
+        rendered = rendered.replace(&format!("{{{key}}}"), value);
+    }
+    rendered
 }

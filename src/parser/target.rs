@@ -99,10 +99,10 @@ fn validate_json_selector(raw: &Value, input: &str) -> Result<(), TargetParseErr
         }
     }
 
-    if let Some(kind) = object.get("kind") {
-        if kind.as_str() != Some("user") {
-            return Err(TargetParseError::InvalidSelector(input.to_owned()));
-        }
+    if let Some(kind) = object.get("kind")
+        && kind.as_str() != Some("user")
+    {
+        return Err(TargetParseError::InvalidSelector(input.to_owned()));
     }
 
     let has_id = match object.get("id") {

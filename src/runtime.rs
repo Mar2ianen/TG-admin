@@ -164,7 +164,6 @@ impl Runtime {
         let mut moderation =
             ModerationEngine::new(moderation_storage, self.services.telegram.clone())
                 .with_unit_registry_handle(registry_handle.clone())
-                .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
                 .without_processed_update_guard();
 
         if let Some(reputation) = self.services.reputation_client.clone() {
@@ -185,10 +184,10 @@ impl Runtime {
                 .with_gateway(Arc::new(self.services.telegram.clone()))
                 .with_storage(self.services.storage.clone()),
         );
-        let ingress = self.services.polling_bot().map(|bot| {
-            IngressPipeline::new(bot, ingress_storage, router.clone())
-                .with_admin_user_ids(config.telegram.admin_user_ids.iter().copied())
-        });
+        let ingress = self
+            .services
+            .polling_bot()
+            .map(|bot| IngressPipeline::new(bot, ingress_storage, router.clone()));
 
         RuntimeExecution {
             host_api: Some(host_api),

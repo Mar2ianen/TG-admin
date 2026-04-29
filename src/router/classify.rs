@@ -166,20 +166,20 @@ fn parse_command_name(raw: &str) -> Option<String> {
     }
 
     // Обработка префиксов callback data
-    if let Some(rest) = raw.strip_prefix("warn:") {
-        if rest.chars().all(|c| c.is_ascii_digit()) {
-            return Some("warn".to_owned());
-        }
+    if let Some(rest) = raw.strip_prefix("warn:")
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some("warn".to_owned());
     }
-    if let Some(rest) = raw.strip_prefix("mute:") {
-        if rest.chars().all(|c| c.is_ascii_digit()) {
-            return Some("mute".to_owned());
-        }
+    if let Some(rest) = raw.strip_prefix("mute:")
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some("mute".to_owned());
     }
-    if let Some(rest) = raw.strip_prefix("ban:") {
-        if rest.chars().all(|c| c.is_ascii_digit()) {
-            return Some("ban".to_owned());
-        }
+    if let Some(rest) = raw.strip_prefix("ban:")
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some("ban".to_owned());
     }
 
     None

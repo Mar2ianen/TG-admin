@@ -155,20 +155,83 @@ impl IngressPipeline {
     }
 
     async fn process_event(&self, event: EventContext) -> Result<IngressProcessResult> {
+        let mut event = event;
         if let Some(result) = self.preflight_processed_update(&event)? {
             return Ok(result);
         }
 
+        self.refresh_admin_state(&mut event).await?;
+        self.upsert_sender_user(&event)?;
         self.append_message_journal(&event)?;
         self.update_counters(&event)?;
 
-        self.router
-            .route(&event)
-            .await
-            .context("failed to route ingress event")?;
+        match self.router.route(&event).await {
+            Ok(_) => {}
+            Err(crate::router::RoutingError::Moderation(err)) => {
+                self.router
+                    .handle_moderation_error(&event, err)
+                    .await
+                    .context("failed to report moderation error back to chat")?;
+            }
+            Err(err) => {
+                return Err(err).context("failed to route ingress event");
+            }
+        }
         self.complete_processed_update(&event)?;
 
         Ok(IngressProcessResult::Processed)
+    }
+
+    async fn refresh_admin_state(&self, event: &mut EventContext) -> Result<()> {
+        let Some(chat) = event.chat.as_ref() else {
+            return Ok(());
+        };
+        if chat.route_class() != crate::event::ChatRouteClass::GroupLike {
+            return Ok(());
+        }
+
+        if let Some(member) = event.chat_member.as_ref() {
+            let is_admin = member_status_is_admin(&member.new_status);
+            self.storage
+                .set_chat_user_is_admin(chat.id, member.user.id, is_admin)?;
+        }
+
+        let should_refresh = event.command_source().is_some();
+
+        let Some(sender) = event.sender.as_mut() else {
+            return Ok(());
+        };
+        if sender.is_bot {
+            return Ok(());
+        }
+
+        let cached = self.storage.get_chat_user_is_admin(chat.id, sender.id)?;
+        if let Some(is_admin) = cached {
+            sender.is_admin = is_admin;
+        }
+
+        let should_refresh = should_refresh || cached.is_none();
+        if !should_refresh {
+            return Ok(());
+        }
+
+        match fetch_chat_member_is_admin(&self.bot, chat.id, sender.id).await {
+            Ok(is_admin) => {
+                self.storage
+                    .set_chat_user_is_admin(chat.id, sender.id, is_admin)?;
+                sender.is_admin = is_admin;
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    chat_id = chat.id,
+                    user_id = sender.id,
+                    "failed to refresh sender admin status from telegram; keeping cached value"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     fn update_counters(&self, event: &EventContext) -> Result<()> {
@@ -177,12 +240,32 @@ impl IngressPipeline {
         }
 
         let plan = self.router.plan(event);
-        if plan.classified.command_name.is_none() {
-            if let (Some(chat), Some(sender)) = (&event.chat, &event.sender) {
-                self.storage
-                    .increment_message_counters(chat.id, sender.id)?;
-            }
+        if plan.classified.command_name.is_none()
+            && let (Some(chat), Some(sender)) = (&event.chat, &event.sender)
+        {
+            self.storage
+                .increment_message_counters(chat.id, sender.id)?;
         }
+
+        Ok(())
+    }
+
+    fn upsert_sender_user(&self, event: &EventContext) -> Result<()> {
+        let Some(sender) = event.sender.as_ref() else {
+            return Ok(());
+        };
+
+        self.storage.upsert_user(&crate::storage::UserPatch {
+            user_id: sender.id,
+            username: sender.username.clone(),
+            display_name: sender.display_name.clone(),
+            seen_at: event.received_at.to_rfc3339(),
+            warn_count: None,
+            shadowbanned: None,
+            reputation: None,
+            state_json: None,
+            updated_at: event.received_at.to_rfc3339(),
+        })?;
 
         Ok(())
     }
@@ -248,6 +331,8 @@ impl IngressPipeline {
                 "media_group_id": message.media_group_id,
                 "author_kind": format!("{:?}", event.author_source_class()),
                 "linked_channel_style": event.is_linked_channel_style_approx(),
+                "sender_username": event.sender.as_ref().and_then(|sender| sender.username.clone()),
+                "sender_display_name": event.sender.as_ref().and_then(|sender| sender.display_name.clone()),
             }))?),
         })?;
 
@@ -722,6 +807,27 @@ fn next_retry_delay(current: Duration) -> Duration {
         current.checked_add(current).unwrap_or(POLL_RETRY_MAX_DELAY),
         POLL_RETRY_MAX_DELAY,
     )
+}
+
+async fn fetch_chat_member_is_admin(
+    bot: &teloxide_core::Bot,
+    chat_id: i64,
+    user_id: i64,
+) -> Result<bool> {
+    let member = bot
+        .get_chat_member(
+            teloxide_core::types::ChatId(chat_id),
+            teloxide_core::types::UserId(user_id as u64),
+        )
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch chat member {user_id} in chat {chat_id}"))?;
+
+    Ok(member.is_administrator() || member.is_owner())
+}
+
+fn member_status_is_admin(status: &str) -> bool {
+    status.starts_with("Administrator") || status.starts_with("Owner")
 }
 
 fn format_error_chain(error: &anyhow::Error) -> String {

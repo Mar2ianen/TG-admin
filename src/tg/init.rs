@@ -23,8 +23,17 @@ impl<'a> ChatInitializer<'a> {
             format!("failed to fetch Telegram administrators for chat {chat_id}")
         })? {
             TelegramResult::ChatAdministrators(result) => {
+                let admin_user_ids: Vec<i64> = result
+                    .administrators
+                    .iter()
+                    .map(|member| member.user_id)
+                    .collect();
                 let is_admin = result.administrators.iter().any(|m| m.user_id == bot_id);
                 let conn = self.storage.open()?;
+                conn.replace_chat_admin_roster(chat_id, &admin_user_ids)
+                    .with_context(|| {
+                        format!("failed to persist chat admin roster for chat {chat_id}")
+                    })?;
                 conn.set_bot_is_admin(chat_id, is_admin).with_context(|| {
                     format!("failed to persist bot admin state for chat {chat_id}")
                 })?;
@@ -154,6 +163,14 @@ mod tests {
                 .expect("storage open")
                 .get_bot_is_admin(-100123)
                 .expect("load state")
+        );
+        assert_eq!(
+            storage
+                .open()
+                .expect("storage open")
+                .get_chat_user_is_admin(-100123, 42)
+                .expect("load admin cache"),
+            Some(true)
         );
     }
 

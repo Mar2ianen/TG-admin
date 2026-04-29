@@ -55,12 +55,12 @@ async fn test_json_export_performance() {
         total_events += 1;
         // We use a simplified process_event for perf test to avoid unnecessary overhead
         // but still trigger counters
-        if let (Some(chat), Some(sender)) = (&event.chat, &event.sender) {
-            if event.message.is_some() {
-                storage
-                    .increment_message_counters(chat.id, sender.id)
-                    .expect("increment failed");
-            }
+        if let (Some(chat), Some(sender)) = (&event.chat, &event.sender)
+            && event.message.is_some()
+        {
+            storage
+                .increment_message_counters(chat.id, sender.id)
+                .expect("increment failed");
         }
     }
     let process_duration = start_process.elapsed();

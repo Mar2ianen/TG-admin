@@ -1,7 +1,7 @@
 use super::{ModerationEngine, ModerationError, ModerationEventResult, ModerationUnitPolicy};
 use crate::event::{
-    ChatContext, EventNormalizer, ManualInvocationInput, MessageContext, ReplyContext,
-    SenderContext, TelegramUpdateInput, UnitContext,
+    ChatContext, EventNormalizer, ExecutionMode, ManualInvocationInput, MessageContext,
+    ReplyContext, SenderContext, SystemContext, TelegramUpdateInput, UnitContext,
 };
 use crate::tg::{
     TelegramDeleteResult, TelegramGateway, TelegramMessageResult, TelegramRequest, TelegramResult,
@@ -302,6 +302,20 @@ fn reply_event_with_sender(
 ) -> crate::event::EventContext {
     let mut event = reply_event(command_text, reply_user_id, reply_message_id);
     event.sender = Some(sender);
+    event
+}
+
+fn live_reply_event_with_sender(
+    command_text: &str,
+    reply_user_id: i64,
+    reply_message_id: i32,
+    sender: SenderContext,
+) -> crate::event::EventContext {
+    let mut event = reply_event_with_sender(command_text, reply_user_id, reply_message_id, sender);
+    event.execution_mode = ExecutionMode::Realtime;
+    event.recovery = false;
+    event.update_id = Some(4242);
+    event.system = SystemContext::realtime();
     event
 }
 
@@ -668,6 +682,42 @@ async fn configured_admin_id_can_execute_even_without_sender_admin_flag() {
 }
 
 #[tokio::test]
+async fn chat_admin_from_storage_can_execute_without_config_allowlist() {
+    let (_dir, requests, engine) = engine_without_registry();
+    engine
+        .storage
+        .set_chat_user_is_admin(-100123, 777, true)
+        .expect("seed chat admin");
+    engine
+        .storage
+        .upsert_user(&crate::storage::UserPatch {
+            user_id: 99,
+            username: Some("spam_user".to_owned()),
+            display_name: Some("Spam User".to_owned()),
+            seen_at: ts().to_rfc3339(),
+            warn_count: None,
+            shadowbanned: None,
+            reputation: None,
+            state_json: None,
+            updated_at: ts().to_rfc3339(),
+        })
+        .expect("seed seen user");
+    let event = live_reply_event_with_sender("/ban @spam_user spam", 99, 810, non_admin_sender());
+
+    let result = engine
+        .handle_event(&event)
+        .await
+        .expect("chat admin from storage succeeds");
+
+    assert!(matches!(result, ModerationEventResult::Executed(_)));
+    let requests = requests.lock().expect("requests");
+    let TelegramRequest::Ban(request) = &requests[0] else {
+        panic!("expected ban request");
+    };
+    assert_eq!(request.user_id, 99);
+}
+
+#[tokio::test]
 async fn ping_is_available_to_non_admin_sender() {
     let (_dir, requests, engine) = engine_without_registry();
     let event = reply_event_with_sender("/ping", 99, 810, non_admin_sender());
@@ -715,4 +765,36 @@ async fn help_is_available_to_non_admin_sender() {
     assert!(request.text.contains("<b>Публичные команды</b>"));
     assert!(request.text.contains("<code>/ping</code>"));
     assert!(request.text.contains("<b>Команды модерации</b>"));
+}
+
+#[tokio::test]
+async fn ban_resolves_username_target_from_seen_users_cache() {
+    let (_dir, requests, engine) = engine_with_caps_and_admins(&["tg.moderate.ban"], [777]);
+    engine
+        .storage
+        .upsert_user(&crate::storage::UserPatch {
+            user_id: 99,
+            username: Some("spam_user".to_owned()),
+            display_name: Some("Spam User".to_owned()),
+            seen_at: ts().to_rfc3339(),
+            warn_count: None,
+            shadowbanned: None,
+            reputation: None,
+            state_json: None,
+            updated_at: ts().to_rfc3339(),
+        })
+        .expect("seed seen user");
+    let event = reply_event_with_sender("/ban @spam_user spam", 99, 810, non_admin_sender());
+
+    let result = engine
+        .handle_event(&event)
+        .await
+        .expect("ban by username succeeds");
+
+    assert!(matches!(result, ModerationEventResult::Executed(_)));
+    let requests = requests.lock().expect("requests");
+    let TelegramRequest::Ban(request) = &requests[0] else {
+        panic!("expected ban request");
+    };
+    assert_eq!(request.user_id, 99);
 }

@@ -197,6 +197,27 @@ impl StorageConnection {
             .map_err(StorageError::from)
     }
 
+    pub fn get_user_by_username(&self, username: &str) -> Result<Option<UserRecord>, StorageError> {
+        let normalized = username.trim().trim_start_matches('@').to_ascii_lowercase();
+        if normalized.is_empty() {
+            return Ok(None);
+        }
+
+        let mut statement = self.connection.prepare(
+            "SELECT user_id, username, display_name, first_seen_at, last_seen_at,
+                    warn_count, shadowbanned, reputation, state_json, updated_at
+             FROM users
+             WHERE lower(username) = ?1
+             ORDER BY last_seen_at DESC
+             LIMIT 1",
+        )?;
+
+        statement
+            .query_row(params![normalized], map_user_row)
+            .optional()
+            .map_err(StorageError::from)
+    }
+
     pub fn upsert_user(&self, patch: &UserPatch) -> Result<UserRecord, StorageError> {
         self.connection.execute(
             "INSERT INTO users (
@@ -498,10 +519,10 @@ impl StorageConnection {
     }
 
     pub fn insert_job(&self, job: &JobRecord) -> Result<JobRecord, StorageError> {
-        if let Some(dedupe_key) = job.dedupe_key.as_deref() {
-            if let Some(existing) = self.get_job_by_dedupe_key(dedupe_key)? {
-                return Ok(existing);
-            }
+        if let Some(dedupe_key) = job.dedupe_key.as_deref()
+            && let Some(existing) = self.get_job_by_dedupe_key(dedupe_key)?
+        {
+            return Ok(existing);
         }
 
         match self.connection.execute(
@@ -530,10 +551,10 @@ impl StorageConnection {
         ) {
             Ok(_) => Ok(job.clone()),
             Err(error) => {
-                if let Some(dedupe_key) = job.dedupe_key.as_deref() {
-                    if let Some(existing) = self.get_job_by_dedupe_key(dedupe_key)? {
-                        return Ok(existing);
-                    }
+                if let Some(dedupe_key) = job.dedupe_key.as_deref()
+                    && let Some(existing) = self.get_job_by_dedupe_key(dedupe_key)?
+                {
+                    return Ok(existing);
                 }
 
                 Err(error.into())
@@ -898,5 +919,52 @@ impl StorageConnection {
                     .map(|e| serde_json::from_str(&e.value_json).unwrap_or(false))
                     .unwrap_or(false)
             })
+    }
+
+    pub fn set_chat_user_is_admin(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+        is_admin: bool,
+    ) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+        self.set_kv(&crate::storage::KvEntry {
+            scope_kind: "chat_user".to_owned(),
+            scope_id: format!("{chat_id}:{user_id}"),
+            key: "is_admin".to_owned(),
+            value_json: serde_json::json!(is_admin).to_string(),
+            updated_at: now,
+        })
+    }
+
+    pub fn get_chat_user_is_admin(
+        &self,
+        chat_id: i64,
+        user_id: i64,
+    ) -> Result<Option<bool>, StorageError> {
+        self.get_kv("chat_user", &format!("{chat_id}:{user_id}"), "is_admin")
+            .map(|entry| entry.and_then(|e| serde_json::from_str(&e.value_json).ok()))
+    }
+
+    pub fn replace_chat_admin_roster(
+        &self,
+        chat_id: i64,
+        admin_user_ids: &[i64],
+    ) -> Result<(), StorageError> {
+        let now = Utc::now().to_rfc3339();
+        self.connection.execute(
+            "UPDATE kv_store
+             SET value_json = 'false', updated_at = ?2
+             WHERE scope_kind = 'chat_user'
+               AND key = 'is_admin'
+               AND scope_id LIKE ?1",
+            params![format!("{chat_id}:%"), now],
+        )?;
+
+        for user_id in admin_user_ids {
+            self.set_chat_user_is_admin(chat_id, *user_id, true)?;
+        }
+
+        Ok(())
     }
 }

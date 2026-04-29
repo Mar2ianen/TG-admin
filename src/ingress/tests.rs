@@ -1,6 +1,7 @@
 use super::{IngressPipeline, IngressProcessResult, update_to_input_with_admin_user_ids};
 use crate::event::{
-    ChatContext, EventNormalizer, MessageContext, SenderContext, TelegramUpdateInput,
+    ChatContext, EventContext, EventNormalizer, ExecutionMode, MemberContext, MessageContext,
+    SenderContext, SystemContext, TelegramUpdateInput, UpdateType,
 };
 use crate::moderation::ModerationEngine;
 use crate::router::{ExecutionOutcome, ExecutionRouter};
@@ -19,6 +20,12 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use teloxide_core::types::Update;
+
+fn ts() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 4, 22, 12, 0, 0)
+        .single()
+        .expect("valid timestamp")
+}
 
 fn pipeline() -> (tempfile::TempDir, IngressPipeline, StorageConnection) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1093,6 +1100,150 @@ async fn process_update_executes_live_warn_via_built_in_moderation() {
     assert_eq!(processed.status, PROCESSED_UPDATE_STATUS_COMPLETED);
     assert_eq!(processed.execution_mode, "realtime");
     assert!(processed.event_id.starts_with("evt_tg_"));
+}
+
+#[tokio::test]
+async fn process_update_upserts_sender_into_users_cache() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Storage::new(dir.path().join("runtime.sqlite3"))
+        .bootstrap()
+        .expect("bootstrap")
+        .into_connection();
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
+    let router = std::rc::Rc::new(
+        ExecutionRouter::new(0, false).with_moderation(
+            ModerationEngine::new(storage.clone(), TelegramGateway::new(true))
+                .with_admin_user_ids([42]),
+        ),
+    );
+    let pipeline = IngressPipeline::new(
+        teloxide_core::Bot::new("123456:TEST_TOKEN"),
+        storage.clone(),
+        router,
+    )
+    .with_admin_user_ids([42]);
+
+    let mut input = TelegramUpdateInput::message(
+        2001,
+        crate::event::ChatContext {
+            id: -100123,
+            chat_type: "supergroup".to_owned(),
+            title: Some("Moderation HQ".to_owned()),
+            username: Some("mod_hq".to_owned()),
+            photo_file_id: None,
+            thread_id: None,
+        },
+        crate::event::SenderContext {
+            id: 77,
+            username: Some("seen_user".to_owned()),
+            display_name: Some("Seen User".to_owned()),
+            first_name: "Seen".to_owned(),
+            last_name: Some("User".to_owned()),
+            photo_file_id: None,
+            is_bot: false,
+            is_admin: false,
+            role: Some("member".to_owned()),
+        },
+        MessageContext {
+            id: 990,
+            date: ts(),
+            text: Some("hello".to_owned()),
+            content_kind: Some(crate::event::MessageContentKind::Text),
+            entities: vec![],
+            has_media: false,
+            file_ids: Vec::new(),
+            reply_to_message_id: None,
+            media_group_id: None,
+        },
+    );
+    input.received_at = ts();
+    let event = EventNormalizer::new()
+        .normalize_telegram(input)
+        .expect("event normalizes");
+
+    let result = pipeline.process_event(event).await.expect("process event");
+    assert!(matches!(result, IngressProcessResult::Processed));
+    let user = storage
+        .get_user(77)
+        .expect("user lookup")
+        .expect("user exists");
+    assert_eq!(user.username.as_deref(), Some("seen_user"));
+}
+
+#[tokio::test]
+async fn process_event_persists_chat_admin_flag_for_member_updates() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Storage::new(dir.path().join("runtime.sqlite3"))
+        .bootstrap()
+        .expect("bootstrap")
+        .into_connection();
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
+    storage
+        .set_chat_user_is_admin(-100123, 42, false)
+        .expect("seed actor cache");
+    let router = std::rc::Rc::new(ExecutionRouter::new(0, false));
+    let pipeline = IngressPipeline::new(
+        teloxide_core::Bot::new("123456:TEST_TOKEN"),
+        storage.clone(),
+        router,
+    );
+
+    let mut event = EventContext::new(
+        "evt_tg_chat_member_admin",
+        UpdateType::ChatMember,
+        ExecutionMode::Realtime,
+        SystemContext::realtime(),
+    );
+    event.update_id = Some(2002);
+    event.received_at = ts();
+    event.chat = Some(ChatContext {
+        id: -100123,
+        chat_type: "supergroup".to_owned(),
+        title: Some("Moderation HQ".to_owned()),
+        username: Some("mod_hq".to_owned()),
+        photo_file_id: None,
+        thread_id: None,
+    });
+    event.sender = Some(SenderContext {
+        id: 42,
+        username: Some("admin".to_owned()),
+        display_name: Some("Admin".to_owned()),
+        first_name: "Admin".to_owned(),
+        last_name: None,
+        photo_file_id: None,
+        is_bot: false,
+        is_admin: false,
+        role: Some("member".to_owned()),
+    });
+    event.chat_member = Some(MemberContext {
+        old_status: "Member".to_owned(),
+        new_status: "Administrator(AdminChatMember)".to_owned(),
+        user: SenderContext {
+            id: 77,
+            username: Some("moderator".to_owned()),
+            display_name: Some("Moderator".to_owned()),
+            first_name: "Moderator".to_owned(),
+            last_name: None,
+            photo_file_id: None,
+            is_bot: false,
+            is_admin: false,
+            role: Some("administrator".to_owned()),
+        },
+    });
+
+    let result = pipeline.process_event(event).await.expect("process event");
+
+    assert!(matches!(result, IngressProcessResult::Processed));
+    assert_eq!(
+        storage
+            .get_chat_user_is_admin(-100123, 77)
+            .expect("admin lookup"),
+        Some(true)
+    );
 }
 
 #[tokio::test]
