@@ -212,7 +212,7 @@ pub struct RouterIndex {
 impl RouterIndex {
     pub fn new() -> Self {
         let mut command_index = HashMap::new();
-        for cmd in ["warn", "mute", "ban", "del", "undo", "msg"] {
+        for cmd in ["warn", "mute", "ban", "del", "undo", "msg", "help", "ping"] {
             command_index.insert(cmd.to_owned(), vec![ExecutionLane::BuiltInModeration]);
         }
         Self {

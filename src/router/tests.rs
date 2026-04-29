@@ -371,6 +371,30 @@ fn router_plan_tracks_buckets_for_non_command_text() {
 }
 
 #[test]
+fn router_indexes_ping_as_built_in_command() {
+    let router = ExecutionRouter::new(0, false);
+    let plan = router.plan(&manual_event("/ping"));
+
+    assert!(plan.lanes.contains(&ExecutionLane::BuiltInModeration));
+    assert!(
+        plan.matched_buckets
+            .contains(&RouteBucket::CommandIndex("ping".to_owned()))
+    );
+}
+
+#[test]
+fn router_indexes_help_as_built_in_command() {
+    let router = ExecutionRouter::new(0, false);
+    let plan = router.plan(&manual_event("/help"));
+
+    assert!(plan.lanes.contains(&ExecutionLane::BuiltInModeration));
+    assert!(
+        plan.matched_buckets
+            .contains(&RouteBucket::CommandIndex("help".to_owned()))
+    );
+}
+
+#[test]
 fn router_index_builds_unit_dispatch_routes_from_registry_triggers() {
     let command_manifest = UnitManifest::new(
         UnitDefinition::new("command.stats.unit"),
@@ -486,6 +510,66 @@ async fn router_executes_built_in_moderation_for_indexed_command() {
             .contains(&RouteBucket::CommandIndex("warn".to_owned()))
     );
     assert!(deferred_invocations.is_empty());
+    assert!(matches!(result, ModerationEventResult::Executed(_)));
+}
+
+#[tokio::test]
+async fn router_executes_ping_via_built_in_moderation() {
+    let dir = tempdir().expect("tempdir");
+    let storage = Storage::new(dir.path().join("runtime.sqlite3"))
+        .bootstrap()
+        .expect("bootstrap")
+        .into_connection();
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
+    let engine = ModerationEngine::new(storage, TelegramGateway::new(true))
+        .with_dry_run(true)
+        .with_admin_user_ids([42]);
+    let router = ExecutionRouter::new(0, false).with_moderation(engine);
+
+    let outcome = router
+        .route(&manual_event("/ping"))
+        .await
+        .expect("routing succeeds");
+
+    let ExecutionOutcome::BuiltInModeration { plan, result, .. } = outcome else {
+        panic!("expected built-in moderation outcome");
+    };
+    assert!(
+        plan.matched_buckets
+            .contains(&RouteBucket::CommandIndex("ping".to_owned()))
+    );
+    assert!(matches!(result, ModerationEventResult::Executed(_)));
+}
+
+#[tokio::test]
+async fn router_executes_help_via_built_in_moderation() {
+    let dir = tempdir().expect("tempdir");
+    let storage = Storage::new(dir.path().join("runtime.sqlite3"))
+        .bootstrap()
+        .expect("bootstrap")
+        .into_connection();
+    storage
+        .set_bot_is_admin(-100123, true)
+        .expect("seed bot admin");
+    let engine = ModerationEngine::new(storage, TelegramGateway::new(true))
+        .with_dry_run(true)
+        .with_admin_user_ids([42]);
+    let router = ExecutionRouter::new(0, false).with_moderation(engine);
+
+    let outcome = router
+        .route(&manual_event("/help"))
+        .await
+        .expect("routing succeeds");
+
+    let ExecutionOutcome::BuiltInModeration { plan, result, .. } = outcome else {
+        panic!("expected built-in moderation outcome");
+    };
+    assert!(
+        plan.matched_buckets
+            .contains(&RouteBucket::CommandIndex("help".to_owned()))
+    );
     assert!(matches!(result, ModerationEventResult::Executed(_)));
 }
 

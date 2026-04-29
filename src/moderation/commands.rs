@@ -18,6 +18,11 @@ use crate::tg::{
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
+const HELP_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/bundled_templates/ui/help.txt"
+));
+
 impl ModerationEngine {
     pub(crate) async fn execute_command_line(
         &self,
@@ -26,9 +31,15 @@ impl ModerationEngine {
         expanded: &ExpandedCommandLine,
         unit_policy: Option<&ModerationUnitPolicy>,
     ) -> Result<ModerationExecution, ModerationError> {
-        self.require_admin(event)?;
-        if let Some(chat) = event.chat.as_ref() {
-            self.require_bot_admin(chat.id)?;
+        let is_public_utility = matches!(
+            &expanded.command,
+            ExpandedCommandAst::Ping(_) | ExpandedCommandAst::Help(_)
+        );
+        if !is_public_utility {
+            self.require_admin(event)?;
+            if let Some(chat) = event.chat.as_ref() {
+                self.require_bot_admin(chat.id)?;
+            }
         }
         let effective_dry_run = self.dry_run || command_dry_run(&parsed.command);
         if matches!(
@@ -62,6 +73,8 @@ impl ModerationEngine {
                 self.execute_message(event, command, effective_dry_run, unit_policy)
                     .await?
             }
+            ExpandedCommandAst::Help(_) => self.execute_help(event, effective_dry_run).await?,
+            ExpandedCommandAst::Ping(_) => self.execute_ping(event, effective_dry_run).await?,
         };
 
         if let (ExpandedCommandAst::Mute(command), Some(pipe)) = (&expanded.command, &expanded.pipe)
@@ -534,6 +547,62 @@ impl ModerationEngine {
                     reply_to_message_id: trigger_message_id(event),
                     silent: false,
                     parse_mode: crate::tg::ParseMode::PlainText,
+                    markup: None,
+                }),
+                TelegramExecutionOptions { dry_run },
+            )
+            .await
+            .map_err(ModerationError::Telegram)?;
+        Ok(ModerationExecution {
+            dry_run,
+            telegram: vec![telegram],
+            audit_entries: Vec::new(),
+            jobs: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn execute_ping(
+        &self,
+        event: &EventContext,
+        dry_run: bool,
+    ) -> Result<ModerationExecution, ModerationError> {
+        let telegram = self
+            .gateway
+            .execute_checked(
+                TelegramRequest::SendMessage(TelegramSendMessageRequest {
+                    chat_id: require_chat_id(event)?,
+                    text: "pong".to_owned(),
+                    reply_to_message_id: None,
+                    silent: false,
+                    parse_mode: crate::tg::ParseMode::PlainText,
+                    markup: None,
+                }),
+                TelegramExecutionOptions { dry_run },
+            )
+            .await
+            .map_err(ModerationError::Telegram)?;
+        Ok(ModerationExecution {
+            dry_run,
+            telegram: vec![telegram],
+            audit_entries: Vec::new(),
+            jobs: Vec::new(),
+        })
+    }
+
+    pub(crate) async fn execute_help(
+        &self,
+        event: &EventContext,
+        dry_run: bool,
+    ) -> Result<ModerationExecution, ModerationError> {
+        let telegram = self
+            .gateway
+            .execute_checked(
+                TelegramRequest::SendMessage(TelegramSendMessageRequest {
+                    chat_id: require_chat_id(event)?,
+                    text: HELP_TEMPLATE.trim().to_owned(),
+                    reply_to_message_id: None,
+                    silent: false,
+                    parse_mode: crate::tg::ParseMode::Html,
                     markup: None,
                 }),
                 TelegramExecutionOptions { dry_run },

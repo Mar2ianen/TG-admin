@@ -1,6 +1,6 @@
 use crate::parser::command::{
-    CommandAst, DeleteCommand, MessageCommand, ModerationCommand, MuteCommand, ParsedCommandLine,
-    ReasonExpr, UndoCommand,
+    CommandAst, DeleteCommand, HelpCommand, MessageCommand, ModerationCommand, MuteCommand,
+    ParsedCommandLine, PingCommand, ReasonExpr, UndoCommand,
 };
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,8 @@ impl ReasonAliasRegistry {
             CommandAst::Del(parsed) => ExpandedCommandAst::Del(parsed.clone()),
             CommandAst::Undo(parsed) => ExpandedCommandAst::Undo(parsed.clone()),
             CommandAst::Msg(parsed) => ExpandedCommandAst::Msg(parsed.clone()),
+            CommandAst::Help(parsed) => ExpandedCommandAst::Help(parsed.clone()),
+            CommandAst::Ping(parsed) => ExpandedCommandAst::Ping(parsed.clone()),
         }
     }
 }
@@ -137,6 +139,8 @@ pub enum ExpandedCommandAst {
     Del(DeleteCommand),
     Undo(UndoCommand),
     Msg(MessageCommand),
+    Help(HelpCommand),
+    Ping(PingCommand),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

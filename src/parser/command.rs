@@ -23,6 +23,8 @@ pub enum CommandAst {
     Del(DeleteCommand),
     Undo(UndoCommand),
     Msg(MessageCommand),
+    Help(HelpCommand),
+    Ping(PingCommand),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -33,6 +35,8 @@ pub enum CommandName {
     Del,
     Undo,
     Msg,
+    Help,
+    Ping,
 }
 
 impl CommandName {
@@ -44,6 +48,8 @@ impl CommandName {
             "del" => Ok(Self::Del),
             "undo" => Ok(Self::Undo),
             "msg" => Ok(Self::Msg),
+            "help" => Ok(Self::Help),
+            "ping" => Ok(Self::Ping),
             other => Err(CommandParseError::UnknownCommand(other.to_owned())),
         }
     }
@@ -105,6 +111,12 @@ pub struct UndoCommand {
 pub struct MessageCommand {
     pub text: String,
 }
+
+#[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
+pub struct HelpCommand;
+
+#[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
+pub struct PingCommand;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ReasonExpr {
@@ -218,6 +230,8 @@ fn validate_pipe(command: &CommandAst) -> Result<(), CommandParseError> {
         CommandAst::Del(_) => Err(CommandParseError::PipeNotAllowed("del".to_owned())),
         CommandAst::Undo(_) => Err(CommandParseError::PipeNotAllowed("undo".to_owned())),
         CommandAst::Msg(_) => Err(CommandParseError::PipeNotAllowed("msg".to_owned())),
+        CommandAst::Help(_) => Err(CommandParseError::PipeNotAllowed("help".to_owned())),
+        CommandAst::Ping(_) => Err(CommandParseError::PipeNotAllowed("ping".to_owned())),
     }
 }
 
@@ -229,6 +243,8 @@ fn command_name_from_ast(name: CommandName) -> &'static str {
         CommandName::Del => "del",
         CommandName::Undo => "undo",
         CommandName::Msg => "msg",
+        CommandName::Help => "help",
+        CommandName::Ping => "ping",
     }
 }
 
@@ -243,6 +259,8 @@ fn parse_command_tokens(
         CommandName::Del => parse_delete_command(tokens, event),
         CommandName::Undo => parse_undo_command(tokens),
         CommandName::Msg => parse_msg_command(tokens),
+        CommandName::Help => parse_help_command(tokens),
+        CommandName::Ping => parse_ping_command(tokens),
     }
 }
 
@@ -366,6 +384,26 @@ fn parse_msg_command(tokens: CommandTokens) -> Result<CommandAst, CommandParseEr
         .join(" ");
 
     Ok(CommandAst::Msg(MessageCommand { text }))
+}
+
+fn parse_ping_command(tokens: CommandTokens) -> Result<CommandAst, CommandParseError> {
+    reject_remaining_flags(&tokens)?;
+
+    if !tokens.arguments.is_empty() {
+        return Err(CommandParseError::UnexpectedArguments("ping".to_owned()));
+    }
+
+    Ok(CommandAst::Ping(PingCommand))
+}
+
+fn parse_help_command(tokens: CommandTokens) -> Result<CommandAst, CommandParseError> {
+    reject_remaining_flags(&tokens)?;
+
+    if !tokens.arguments.is_empty() {
+        return Err(CommandParseError::UnexpectedArguments("help".to_owned()));
+    }
+
+    Ok(CommandAst::Help(HelpCommand))
 }
 
 fn parse_moderation_flags(
@@ -816,6 +854,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_ping_command() {
+        let event = realtime_event();
+
+        let parsed = super::parse_command_line("/ping", &event).expect("ping parses");
+        assert!(matches!(parsed.command, CommandAst::Ping(_)));
+    }
+
+    #[test]
+    fn parses_help_command() {
+        let event = realtime_event();
+
+        let parsed = super::parse_command_line("/help", &event).expect("help parses");
+        assert!(matches!(parsed.command, CommandAst::Help(_)));
+    }
+
+    #[test]
     fn parses_quoted_reason_with_spaces() {
         let event = realtime_event();
 
@@ -962,5 +1016,27 @@ mod tests {
         let err = super::parse_command_line("/warn @user 2.8 | /msg done", &event)
             .expect_err("warn pipe is invalid");
         assert_eq!(err, CommandParseError::PipeNotAllowed("warn".to_owned()));
+    }
+
+    #[test]
+    fn rejects_ping_arguments() {
+        let event = realtime_event();
+
+        let err = super::parse_command_line("/ping now", &event).expect_err("ping args must fail");
+        assert_eq!(
+            err,
+            CommandParseError::UnexpectedArguments("ping".to_owned())
+        );
+    }
+
+    #[test]
+    fn rejects_help_arguments() {
+        let event = realtime_event();
+
+        let err = super::parse_command_line("/help now", &event).expect_err("help args must fail");
+        assert_eq!(
+            err,
+            CommandParseError::UnexpectedArguments("help".to_owned())
+        );
     }
 }

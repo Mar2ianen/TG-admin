@@ -79,6 +79,7 @@ impl IngressPipeline {
                         Err(err) => {
                             warn!(
                                 error = %err,
+                                error_chain = %format_error_chain(&err),
                                 ?offset,
                                 retry_delay_ms = retry_delay.as_millis(),
                                 "ingress polling failed; retrying"
@@ -131,6 +132,7 @@ impl IngressPipeline {
                 warn!(
                     update_id = update.id.0,
                     error = %err,
+                    error_chain = %format_error_chain(&err),
                     "failed to process telegram update; continuing"
                 );
             }
@@ -720,6 +722,14 @@ fn next_retry_delay(current: Duration) -> Duration {
         current.checked_add(current).unwrap_or(POLL_RETRY_MAX_DELAY),
         POLL_RETRY_MAX_DELAY,
     )
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 #[cfg(test)]

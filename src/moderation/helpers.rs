@@ -24,6 +24,8 @@ pub fn command_dry_run(command: &CommandAst) -> bool {
         CommandAst::Del(command) => command.flags.dry_run,
         CommandAst::Undo(command) => command.dry_run,
         CommandAst::Msg(_) => false,
+        CommandAst::Help(_) => false,
+        CommandAst::Ping(_) => false,
     }
 }
 

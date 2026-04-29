@@ -666,3 +666,53 @@ async fn configured_admin_id_can_execute_even_without_sender_admin_flag() {
     assert!(matches!(result, ModerationEventResult::Executed(_)));
     assert_eq!(requests.lock().expect("requests").len(), 1);
 }
+
+#[tokio::test]
+async fn ping_is_available_to_non_admin_sender() {
+    let (_dir, requests, engine) = engine_without_registry();
+    let event = reply_event_with_sender("/ping", 99, 810, non_admin_sender());
+
+    let result = engine.handle_event(&event).await.expect("ping succeeds");
+
+    assert!(matches!(result, ModerationEventResult::Executed(_)));
+    let requests = requests.lock().expect("requests");
+    let TelegramRequest::SendMessage(request) = &requests[0] else {
+        panic!("expected send_message request");
+    };
+    assert_eq!(request.text, "pong");
+    assert_eq!(request.reply_to_message_id, None);
+}
+
+#[tokio::test]
+async fn ping_bypasses_bot_admin_gate() {
+    let (_dir, requests, engine) = engine_without_registry();
+    engine
+        .storage
+        .set_bot_is_admin(-100123, false)
+        .expect("clear bot admin");
+    let event = reply_event_with_sender("/ping", 99, 810, non_admin_sender());
+
+    let result = engine.handle_event(&event).await.expect("ping succeeds");
+
+    assert!(matches!(result, ModerationEventResult::Executed(_)));
+    assert_eq!(requests.lock().expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn help_is_available_to_non_admin_sender() {
+    let (_dir, requests, engine) = engine_without_registry();
+    let event = reply_event_with_sender("/help", 99, 810, non_admin_sender());
+
+    let result = engine.handle_event(&event).await.expect("help succeeds");
+
+    assert!(matches!(result, ModerationEventResult::Executed(_)));
+    let requests = requests.lock().expect("requests");
+    let TelegramRequest::SendMessage(request) = &requests[0] else {
+        panic!("expected send_message request");
+    };
+    assert_eq!(request.reply_to_message_id, None);
+    assert_eq!(request.parse_mode, crate::tg::ParseMode::Html);
+    assert!(request.text.contains("<b>Публичные команды</b>"));
+    assert!(request.text.contains("<code>/ping</code>"));
+    assert!(request.text.contains("<b>Команды модерации</b>"));
+}

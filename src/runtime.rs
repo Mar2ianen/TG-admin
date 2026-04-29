@@ -20,11 +20,15 @@ use crate::tg::{
 use crate::unit::{UnitRegistry, UnitRegistryStatus};
 use anyhow::{Context, Result};
 use chrono::{Datelike, Duration as ChronoDuration, Timelike, Utc};
+use reqwest::Client;
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::time;
+
+const TELEGRAM_POLL_HTTP_TIMEOUT_SECS: u64 = 35;
+const TELEGRAM_POLL_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 // Runtime execution model: single-threaded by design.
 //
@@ -499,7 +503,7 @@ impl RuntimeServices {
                 config.telegram.polling,
                 config.telegram.bot_token.as_deref(),
             ) {
-                (true, Some(token)) => Some(teloxide_core::Bot::new(token.to_owned())),
+                (true, Some(token)) => Some(build_polling_bot(token)?),
                 _ => None,
             },
             reputation_client,
@@ -510,6 +514,22 @@ impl RuntimeServices {
     fn polling_bot(&self) -> Option<teloxide_core::Bot> {
         self.polling_bot.clone()
     }
+}
+
+fn build_polling_bot(token: &str) -> Result<teloxide_core::Bot> {
+    let client = Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(
+            TELEGRAM_POLL_CONNECT_TIMEOUT_SECS,
+        ))
+        // Long polling uses getUpdates timeout=30, so the HTTP timeout must be higher.
+        .timeout(std::time::Duration::from_secs(
+            TELEGRAM_POLL_HTTP_TIMEOUT_SECS,
+        ))
+        .tcp_nodelay(true)
+        .build()
+        .context("failed to build telegram polling client")?;
+
+    Ok(teloxide_core::Bot::with_client(token.to_owned(), client))
 }
 
 #[derive(Debug, Default)]
