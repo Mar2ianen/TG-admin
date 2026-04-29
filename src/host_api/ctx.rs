@@ -1,12 +1,11 @@
 use super::{
-    validate_event, CtxCurrentValue, CtxExpandReasonRequest, CtxParseDurationRequest,
-    CtxResolveTargetRequest, HostApi, HostApiError, HostApiErrorDetail, HostApiOperation,
-    HostApiResponse,
+    CtxCurrentValue, CtxExpandReasonRequest, CtxParseDurationRequest, CtxResolveTargetRequest,
+    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, validate_event,
 };
 use crate::event::EventContext;
-use crate::parser::duration::{parse_duration, ParsedDuration};
+use crate::parser::duration::{ParsedDuration, parse_duration};
 use crate::parser::reason::ExpandedReason;
-use crate::parser::target::{parse_target_selector, resolve_target, ResolvedTarget};
+use crate::parser::target::{ResolvedTarget, parse_target_selector, resolve_target};
 
 impl HostApi {
     pub(crate) fn ctx_current(

@@ -1,9 +1,9 @@
 use super::{
-    apply_user_patch, storage_error, user_patch_from_increment, validate_event, validate_kv_entry,
-    validate_kv_key, validate_user_id, validate_user_incr_request, validate_user_patch,
     DbKvGetRequest, DbKvGetValue, DbKvSetRequest, DbKvSetValue, DbUserGetRequest, DbUserGetValue,
     DbUserIncrRequest, DbUserIncrValue, DbUserPatchRequest, DbUserPatchValue, HostApi,
-    HostApiError, HostApiOperation, HostApiResponse,
+    HostApiError, HostApiOperation, HostApiResponse, apply_user_patch, storage_error,
+    user_patch_from_increment, validate_event, validate_kv_entry, validate_kv_key,
+    validate_user_id, validate_user_incr_request, validate_user_patch,
 };
 use crate::event::EventContext;
 

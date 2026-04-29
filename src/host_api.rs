@@ -3,8 +3,8 @@ use std::rc::Rc;
 
 use crate::event::EventContext;
 use crate::host_api::contract::{
-    HostApiRequest, HostApiResponse, HostApiValue, TgSendMessageRequest, TgSendMessageValue,
-    MlTranscribeRequest, MlTranscribeValue,
+    HostApiRequest, HostApiResponse, HostApiValue, MlTranscribeRequest, MlTranscribeValue,
+    TgSendMessageRequest, TgSendMessageValue,
 };
 use crate::parser::reason::ReasonAliasRegistry;
 use crate::storage::StorageConnection;
@@ -27,9 +27,9 @@ pub use contract::*;
 pub use error::{HostApiError, HostApiErrorDetail, HostApiErrorKind};
 pub use ml::MlServerTransport;
 pub(crate) use validation::{
-    apply_user_patch, execution_mode_label, storage_error, to_rfc3339,
-    user_patch_from_increment, validate_event, validate_kv_entry, validate_kv_key,
-    validate_non_empty, validate_user_id, validate_user_incr_request, validate_user_patch,
+    apply_user_patch, execution_mode_label, storage_error, to_rfc3339, user_patch_from_increment,
+    validate_event, validate_kv_entry, validate_kv_key, validate_non_empty, validate_user_id,
+    validate_user_incr_request, validate_user_patch,
 };
 
 #[cfg(test)]

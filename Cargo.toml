@@ -2,7 +2,7 @@
 name = "telegram-moderation-os"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94"
 authors = ["Mikhail"]
 description = "Unit-based Telegram moderation runtime: Rust core + Rhai VM"
 license = "MIT"

@@ -5,3 +5,4 @@ result.json
 Json test/
 *.sqlite3*
 .env
+config.toml

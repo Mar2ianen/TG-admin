@@ -1,6 +1,6 @@
 use super::{
-    validate_event, validate_non_empty, HostApi, HostApiError, HostApiErrorDetail,
-    HostApiOperation, HostApiResponse, UnitStatusEntry, UnitStatusRequest, UnitStatusValue,
+    HostApi, HostApiError, HostApiErrorDetail, HostApiOperation, HostApiResponse, UnitStatusEntry,
+    UnitStatusRequest, UnitStatusValue, validate_event, validate_non_empty,
 };
 use crate::event::EventContext;
 

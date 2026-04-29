@@ -12,6 +12,7 @@
 
 use crate::event::EventContext;
 
+use crate::host_api::HostApi;
 use crate::host_api::contract::HostApiValue;
 use crate::host_api::contract::{
     DbKvGetRequest, DbKvSetRequest, DbUserGetRequest, HostApiRequest, MlTranscribeRequest,
@@ -20,7 +21,6 @@ use crate::host_api::contract::{
 use crate::host_api::ml::{
     MlChatCompletionsRequest, MlChatMessage, MlEmbedTextRequest, MlHealthRequest, MlModelsRequest,
 };
-use crate::host_api::HostApi;
 use crate::storage::KvEntry;
 use rhai::{Dynamic, Engine, Scope};
 use std::cell::RefCell;

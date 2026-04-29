@@ -151,7 +151,11 @@ impl ExecutionRouter {
             .registry
             .borrow()
             .clone()
-            .or_else(|| self.moderation.as_ref().and_then(|m| m.unit_registry.clone()))
+            .or_else(|| {
+                self.moderation
+                    .as_ref()
+                    .and_then(|m| m.unit_registry.clone())
+            })
             .unwrap_or_else(|| Rc::new(UnitRegistry::new()));
 
         let invocations = select_unit_dispatches(&registry, event);

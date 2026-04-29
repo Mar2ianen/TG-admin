@@ -12,7 +12,7 @@ use crate::shutdown::{ShutdownController, ShutdownReason};
 use crate::storage::JobRecord;
 use crate::storage::Storage;
 use crate::storage::StorageConnection;
-use crate::tg::init::{fetch_bot_id, ChatInitializer};
+use crate::tg::init::{ChatInitializer, fetch_bot_id};
 use crate::tg::{
     ParseMode, TelegramExecutionOptions, TelegramGateway, TelegramRequest,
     TelegramSendMessageRequest, TeloxideCoreTransport,

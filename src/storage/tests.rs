@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::storage::{Storage, StorageConnection};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
@@ -548,10 +548,12 @@ fn jobs_dedupe_by_partial_unique_index() {
 
     assert_eq!(stored_first, first);
     assert_eq!(stored_second, first);
-    assert!(storage
-        .get_job(&second.job_id)
-        .unwrap_or_else(|error| panic!("failed to load duplicate job: {error}"))
-        .is_none());
+    assert!(
+        storage
+            .get_job(&second.job_id)
+            .unwrap_or_else(|error| panic!("failed to load duplicate job: {error}"))
+            .is_none()
+    );
 }
 
 #[test]

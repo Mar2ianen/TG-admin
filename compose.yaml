@@ -26,3 +26,19 @@ services:
       CARGO_INCREMENTAL: "1"
     command: cargo test
     init: true
+
+  live:
+    build:
+      context: .
+      dockerfile: Containerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      CARGO_TARGET_DIR: /workspace/target
+      CARGO_INCREMENTAL: "1"
+      TMO_BOT_TOKEN: ${TMO_BOT_TOKEN}
+      RUST_LOG: ${RUST_LOG:-info}
+    command: cargo run --release
+    restart: unless-stopped
+    init: true

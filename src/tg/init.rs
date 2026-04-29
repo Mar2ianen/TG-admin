@@ -1,6 +1,6 @@
 use crate::storage::Storage;
 use crate::tg::{ChatId, TelegramRequest, TelegramResult, TelegramTransport};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::convert::TryFrom;
 use teloxide_core::requests::Requester;
 
@@ -148,11 +148,13 @@ mod tests {
             .expect("chat initialization succeeds");
 
         assert!(is_admin);
-        assert!(storage
-            .open()
-            .expect("storage open")
-            .get_bot_is_admin(-100123)
-            .expect("load state"));
+        assert!(
+            storage
+                .open()
+                .expect("storage open")
+                .get_bot_is_admin(-100123)
+                .expect("load state")
+        );
     }
 
     #[tokio::test]
