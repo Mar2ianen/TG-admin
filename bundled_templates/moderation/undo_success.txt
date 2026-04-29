@@ -1,1 +1,1 @@
-Последнее действие модерации отменено: <code>{op}</code> для <code>{target}</code>.
+↩️ Администратор {admin_link} отменил действие <code>{op}</code> для {user_link}.

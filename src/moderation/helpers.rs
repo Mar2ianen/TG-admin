@@ -90,13 +90,6 @@ pub fn moderation_reason(reason: Option<&ExpandedReason>) -> Option<ModerationRe
     })
 }
 
-pub fn build_notice_text(action: &str, target: &str, reason: Option<&ExpandedReason>) -> String {
-    let reason = reason
-        .map(reason_text)
-        .unwrap_or_else(|| "without a recorded reason".to_owned());
-    format!("{action} {target}: {reason}")
-}
-
 pub fn undo_reference_message_id(event: &EventContext) -> Option<i32> {
     event
         .message
@@ -248,12 +241,4 @@ pub fn hash_text(input: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     input.hash(&mut hasher);
     hasher.finish()
-}
-
-pub fn render_template(template: &str, bindings: &[(&str, &str)]) -> String {
-    let mut rendered = template.trim().to_owned();
-    for (key, value) in bindings {
-        rendered = rendered.replace(&format!("{{{key}}}"), value);
-    }
-    rendered
 }

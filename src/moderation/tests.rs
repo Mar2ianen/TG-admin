@@ -474,6 +474,58 @@ async fn undo_compensates_previous_mute() {
 }
 
 #[tokio::test]
+async fn undo_without_reply_reverts_latest_actor_action() {
+    let (_dir, requests, engine) = engine_with_caps(&["tg.moderate.ban", "audit.compensate"]);
+    engine
+        .storage
+        .upsert_user(&crate::storage::UserPatch {
+            user_id: 99,
+            username: Some("spam_user".to_owned()),
+            display_name: Some("Spam User".to_owned()),
+            seen_at: ts().to_rfc3339(),
+            warn_count: None,
+            shadowbanned: None,
+            reputation: None,
+            state_json: None,
+            updated_at: ts().to_rfc3339(),
+        })
+        .expect("seed seen user");
+    let ban_event = reply_event("/ban spam", 99, 810);
+    engine.handle_event(&ban_event).await.expect("ban succeeds");
+
+    let mut undo_event = manual_event("/undo");
+    undo_event.message = Some(MessageContext {
+        id: 901,
+        date: ts(),
+        text: Some("/undo".to_owned()),
+        content_kind: Some(crate::event::MessageContentKind::Text),
+        entities: vec!["bot_command".to_owned()],
+        has_media: false,
+        file_ids: Vec::new(),
+        reply_to_message_id: None,
+        media_group_id: None,
+    });
+    undo_event.reply = None;
+
+    let result = engine
+        .handle_event(&undo_event)
+        .await
+        .expect("undo succeeds");
+
+    let ModerationEventResult::Executed(execution) = result else {
+        panic!("expected executed undo");
+    };
+    assert_eq!(execution.audit_entries[0].op, "undo");
+    let requests = requests.lock().expect("requests");
+    let TelegramRequest::SendMessage(request) = &requests[3] else {
+        panic!("expected send_message request");
+    };
+    assert_eq!(request.parse_mode, crate::tg::ParseMode::Html);
+    assert!(request.text.contains("tg://user?id=99"));
+    assert!(request.text.contains("<code>ban</code>"));
+}
+
+#[tokio::test]
 async fn undo_cannot_compensate_same_action_twice() {
     let (_dir, _requests, engine) = engine_with_caps(&["tg.moderate.restrict", "audit.compensate"]);
     let mute_event = reply_event("/mute 30m spam", 99, 810);
@@ -797,4 +849,12 @@ async fn ban_resolves_username_target_from_seen_users_cache() {
         panic!("expected ban request");
     };
     assert_eq!(request.user_id, 99);
+    let TelegramRequest::SendMessage(request) = &requests[1] else {
+        panic!("expected confirmation message");
+    };
+    assert_eq!(request.parse_mode, crate::tg::ParseMode::Html);
+    assert!(request.text.contains("tg://user?id=99"));
+    assert!(request.text.contains("Spam User (@spam_user)"));
+    assert!(request.text.contains("Member (@member)"));
+    assert!(request.text.contains("tg://user?id=777"));
 }

@@ -10,7 +10,7 @@ use crate::parser::command::{DeleteCommand, MessageCommand, ParsedCommandLine};
 use crate::parser::reason::{
     ExpandedCommandAst, ExpandedCommandLine, ExpandedModerationCommand, ExpandedMuteCommand,
 };
-use crate::storage::{AuditLogEntry, AuditLogFilter, JobRecord, UserPatch};
+use crate::storage::{AuditLogEntry, AuditLogFilter, JobRecord, UserPatch, UserRecord};
 use crate::tg::{
     TelegramBanRequest, TelegramExecutionOptions, TelegramRequest, TelegramRestrictRequest,
     TelegramSendMessageRequest,
@@ -26,6 +26,14 @@ const HELP_TEMPLATE: &str = include_str!(concat!(
 const BAN_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/bundled_templates/moderation/ban.txt"
+));
+const WARN_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/bundled_templates/moderation/warn.txt"
+));
+const MUTE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/bundled_templates/moderation/mute.txt"
 ));
 const UNDO_SUCCESS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -135,19 +143,29 @@ impl ModerationEngine {
         let mut execution = ModerationExecution::new(dry_run);
         if command.command.flags.public_notice {
             self.require_capability(event, unit_policy, "tg.write_message")?;
+            let mut vars = confirmation_vars(
+                event,
+                &target,
+                previous_user.as_ref(),
+                command.expanded_reason.as_ref(),
+            );
+            vars.insert(
+                "warn_count".to_owned(),
+                previous_user
+                    .as_ref()
+                    .map_or(1, |user| user.warn_count.saturating_add(1))
+                    .to_string(),
+            );
+            vars.insert("warn_limit".to_owned(), "∞".to_owned());
             let message = self
                 .gateway
                 .execute_checked(
                     TelegramRequest::SendMessage(TelegramSendMessageRequest {
                         chat_id: require_chat_id(event)?,
-                        text: build_notice_text(
-                            "warned",
-                            &target.label,
-                            command.expanded_reason.as_ref(),
-                        ),
-                        reply_to_message_id: trigger_message_id(event),
+                        text: crate::host_api::template::render_template(WARN_TEMPLATE, vars),
+                        reply_to_message_id: None,
                         silent: command.command.flags.silent,
-                        parse_mode: crate::tg::ParseMode::PlainText,
+                        parse_mode: crate::tg::ParseMode::Html,
                         markup: None,
                     }),
                     TelegramExecutionOptions { dry_run },
@@ -215,25 +233,35 @@ impl ModerationEngine {
             .execute_checked(request, TelegramExecutionOptions { dry_run })
             .await
             .map_err(ModerationError::Telegram)?;
+        let target_user = self
+            .storage
+            .get_user(user_id)
+            .map_err(ModerationError::Storage)?;
 
         let mut execution = ModerationExecution::new(dry_run);
         execution.telegram.push(telegram.clone());
 
         if command.command.flags.public_notice {
             self.require_capability(event, unit_policy, "tg.write_message")?;
+            let mut vars = confirmation_vars(
+                event,
+                &target,
+                target_user.as_ref(),
+                command.expanded_reason.as_ref(),
+            );
+            vars.insert(
+                "duration".to_owned(),
+                format_duration(command.command.duration),
+            );
             let notice = self
                 .gateway
                 .execute_checked(
                     TelegramRequest::SendMessage(TelegramSendMessageRequest {
                         chat_id,
-                        text: build_notice_text(
-                            "muted",
-                            &target.label,
-                            command.expanded_reason.as_ref(),
-                        ),
-                        reply_to_message_id: trigger_message_id(event),
+                        text: crate::host_api::template::render_template(MUTE_TEMPLATE, vars),
+                        reply_to_message_id: None,
                         silent: false,
-                        parse_mode: crate::tg::ParseMode::PlainText,
+                        parse_mode: crate::tg::ParseMode::Html,
                         markup: None,
                     }),
                     TelegramExecutionOptions { dry_run },
@@ -289,6 +317,10 @@ impl ModerationEngine {
         let user_id = self.resolve_target_user_id(&target, "ban")?;
         let chat_id = require_chat_id(event)?;
         let reason = moderation_reason(command.expanded_reason.as_ref());
+        let target_user = self
+            .storage
+            .get_user(user_id)
+            .map_err(ModerationError::Storage)?;
         let telegram = self
             .gateway
             .execute_checked(
@@ -317,14 +349,14 @@ impl ModerationEngine {
                         BAN_TEMPLATE,
                         confirmation_vars(
                             event,
-                            &target.label,
+                            &target,
+                            target_user.as_ref(),
                             command.expanded_reason.as_ref(),
-                            None,
                         ),
                     ),
                     reply_to_message_id: None,
                     silent: false,
-                    parse_mode: crate::tg::ParseMode::PlainText,
+                    parse_mode: crate::tg::ParseMode::Html,
                     markup: None,
                 }),
                 TelegramExecutionOptions { dry_run },
@@ -557,6 +589,12 @@ impl ModerationEngine {
         let target =
             execute_compensation(self, event, &recipe, dry_run, &mut execution, unit_policy)
                 .await?;
+        let target_user = target
+            .user_id
+            .map(|user_id| self.storage.get_user(user_id))
+            .transpose()
+            .map_err(ModerationError::Storage)?
+            .flatten();
         let success = self
             .gateway
             .execute_checked(
@@ -564,11 +602,11 @@ impl ModerationEngine {
                     chat_id,
                     text: crate::host_api::template::render_template(
                         UNDO_SUCCESS_TEMPLATE,
-                        confirmation_vars(event, &target.label, None, Some(&original.op)),
+                        undo_confirmation_vars(event, &target, target_user.as_ref(), &original.op),
                     ),
                     reply_to_message_id: None,
                     silent: false,
-                    parse_mode: crate::tg::ParseMode::PlainText,
+                    parse_mode: crate::tg::ParseMode::Html,
                     markup: None,
                 }),
                 TelegramExecutionOptions { dry_run },
@@ -773,31 +811,114 @@ impl ModerationEngine {
 
 fn confirmation_vars(
     event: &EventContext,
-    target_label: &str,
+    target: &ExecutionTarget,
+    target_user: Option<&UserRecord>,
     reason: Option<&crate::parser::reason::ExpandedReason>,
-    op: Option<&str>,
 ) -> HashMap<String, String> {
-    let mut vars = crate::host_api::template::TemplateContext::new()
-        .with_event(event)
-        .into_map();
-    vars.insert(
-        "admin_link".to_owned(),
-        event
-            .sender
-            .as_ref()
-            .and_then(|sender| sender.display_name.clone())
-            .unwrap_or_else(|| "Администратор".to_owned()),
-    );
-    vars.insert("user_link".to_owned(), target_label.to_owned());
+    let mut vars = HashMap::new();
+    let (date, time) = format_event_timestamp(event);
+    vars.insert("admin_link".to_owned(), actor_link(event));
+    vars.insert("user_link".to_owned(), target_link(target, target_user));
     vars.insert(
         "reason".to_owned(),
         reason
-            .map(reason_text)
+            .map(|value| escape_html(&reason_text(value)))
             .unwrap_or_else(|| "не указана".to_owned()),
     );
-    if let Some(op) = op {
-        vars.insert("op".to_owned(), op.to_owned());
-    }
-    vars.insert("target".to_owned(), target_label.to_owned());
+    vars.insert("date".to_owned(), date);
+    vars.insert("time".to_owned(), time);
+    vars.insert(
+        "target".to_owned(),
+        escape_html(&target_plain_label(target, target_user)),
+    );
     vars
+}
+
+fn undo_confirmation_vars(
+    event: &EventContext,
+    target: &ExecutionTarget,
+    target_user: Option<&UserRecord>,
+    op: &str,
+) -> HashMap<String, String> {
+    let mut vars = confirmation_vars(event, target, target_user, None);
+    vars.insert("op".to_owned(), escape_html(op));
+    vars
+}
+
+fn actor_link(event: &EventContext) -> String {
+    let Some(sender) = event.sender.as_ref() else {
+        return "Администратор".to_owned();
+    };
+    mention_html(
+        sender.id,
+        sender.username.as_deref(),
+        sender.display_name.as_deref(),
+    )
+}
+
+fn target_link(target: &ExecutionTarget, target_user: Option<&UserRecord>) -> String {
+    if let Some(user_id) = target.user_id.or(target_user.map(|user| user.user_id)) {
+        return mention_html(
+            user_id,
+            target_user
+                .and_then(|user| user.username.as_deref())
+                .or(target.username.as_deref()),
+            target_user.and_then(|user| user.display_name.as_deref()),
+        );
+    }
+
+    escape_html(&target_plain_label(target, target_user))
+}
+
+fn target_plain_label(target: &ExecutionTarget, target_user: Option<&UserRecord>) -> String {
+    if let Some(username) = target_user
+        .and_then(|user| user.username.as_deref())
+        .or(target.username.as_deref())
+    {
+        return format!("@{username}");
+    }
+
+    if let Some(display_name) = target_user.and_then(|user| user.display_name.as_deref()) {
+        return display_name.to_owned();
+    }
+
+    target.label.clone()
+}
+
+fn mention_html(user_id: i64, username: Option<&str>, display_name: Option<&str>) -> String {
+    let label = match (display_name, username) {
+        (Some(display_name), Some(username)) => format!("{display_name} (@{username})"),
+        (Some(display_name), None) => display_name.to_owned(),
+        (None, Some(username)) => format!("@{username}"),
+        (None, None) => user_id.to_string(),
+    };
+    format!(
+        "<a href=\"tg://user?id={user_id}\">{}</a>",
+        escape_html(&label)
+    )
+}
+
+fn format_event_timestamp(event: &EventContext) -> (String, String) {
+    (
+        event.received_at.format("%Y-%m-%d").to_string(),
+        event.received_at.format("%H:%M").to_string(),
+    )
+}
+
+fn format_duration(duration: crate::parser::duration::ParsedDuration) -> String {
+    match duration.unit {
+        crate::parser::duration::DurationUnit::Seconds => format!("{} сек.", duration.value),
+        crate::parser::duration::DurationUnit::Minutes => format!("{} мин.", duration.value),
+        crate::parser::duration::DurationUnit::Hours => format!("{} ч.", duration.value),
+        crate::parser::duration::DurationUnit::Days => format!("{} д.", duration.value),
+        crate::parser::duration::DurationUnit::Weeks => format!("{} нед.", duration.value),
+    }
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
